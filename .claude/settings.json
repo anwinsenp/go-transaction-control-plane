@@ -1,0 +1,56 @@
+{
+  "env": {
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go run:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(go tool pprof:*)",
+      "Bash(gofmt:*)",
+      "Bash(go doc:*)",
+      "Bash(go list:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(tree:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)",
+      "Bash(docker compose:*)",
+      "Bash(kubectl get:*)",
+      "Bash(kubectl describe:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(terraform fmt:*)",
+      "Bash(terraform validate:*)",
+      "Bash(terraform plan:*)",
+      "Bash(curl:*)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep"
+    ],
+    "deny": [
+      "Bash(go get:*)",
+      "Bash(go install:*)",
+      "Bash(go mod edit:*)",
+      "Bash(rm -rf:*)",
+      "Bash(wget:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}
