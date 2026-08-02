@@ -56,13 +56,37 @@ deployed to a public sandbox for demonstration.
 - Migration tooling/scripts for schema setup.
 
 ## Kubernetes operator (`/operator`)
-- Custom CRD representing a "tenant" trading resource.
-- Reconciler loop (via `controller-runtime`) that provisions, scales, or
-  isolates tenant resources based on ingestion traffic metrics.
+- Custom CRD: `TradingTenant`, representing one institutional trading client
+  on the platform. Spec fields: `tenantID`, `minReplicas`/`maxReplicas`,
+  per-pod `resources` (CPU/memory request), `scaling` thresholds
+  (`kafkaLagThreshold`, `p99LatencyThresholdMs`), `isolation.dedicatedNodePool`
+  (bool, set by the operator, not the user). Status fields:
+  `currentReplicas`, `state` (`Stable`/`Scaling`/`Isolated`/`Degraded`),
+  `observedKafkaLag`, `observedP99Ms`, `lastReconcileTime`.
+- Reconciler loop (via `controller-runtime`) implementing joint-signal
+  decision logic — not a single-metric threshold (that's just HPA
+  reimplemented). For each `TradingTenant`, evaluate consumer lag and P99
+  latency together:
+  - **Lag high AND latency high** → genuine under-capacity → scale up
+    (bounded by `maxReplicas`).
+  - **Lag high AND latency normal** → noisy-neighbor / partition-skew
+    pattern, not a capacity problem → isolate onto a dedicated node pool
+    (set `isolation.dedicatedNodePool: true`) instead of blindly adding
+    replicas.
+  - **Latency high AND lag normal** → likely a downstream (Postgres)
+    bottleneck that adding replicas won't fix → set `state: Degraded`,
+    don't scale, surface for investigation rather than masking it.
+  - **Both normal** → `state: Stable`, no action.
+  - Default behavior for most tenants is the shared pool with resource
+    quotas; escalation to `dedicatedNodePool: true` is the exception path
+    for tenants whose signals indicate a genuine isolation need, not the
+    default for every tenant (mirrors how real multi-tenant trading
+    platforms tier clients rather than isolating everyone by default).
 - Reconcile must be idempotent and safe to call repeatedly with the same
   object state; bounded context on any external call.
 - Status subresource updates kept separate from spec mutation.
-- Tests using `controller-runtime`'s fake client, including an explicit
+- Tests using `controller-runtime`'s fake client, with one test case per
+  branch of the decision table above (four cases minimum), plus an explicit
   idempotency test (reconcile twice, assert same end state).
 
 ## Telemetry (`/internal/metrics`, or wherever instrumentation lives)
@@ -91,6 +115,15 @@ deployed to a public sandbox for demonstration.
 - Deploy the ingestion layer to AWS (ECS or EKS) with a public endpoint.
 - Deploy Prometheus + Grafana (or point Grafana at a managed Prometheus) with
   a public, read-only dashboard link.
+- **Use existing operators for undifferentiated infrastructure — do not
+  build custom operators for these.** Kafka: **Strimzi**, if running Kafka
+  in-cluster (otherwise a managed service). TLS: **cert-manager**.
+  Metrics stack: **kube-prometheus-stack**. Postgres: managed (RDS/Aurora)
+  per the original architecture, or a maintained operator (Zalando/PGO) only
+  if running Postgres in-cluster is specifically required. The only
+  custom-built operator in this project is `TradingTenant` — everything
+  else should consume the existing ecosystem, which itself demonstrates
+  knowing when to build vs. when to adopt.
 
 ## Load testing & demo artifacts
 - A load-test script (curl burst or small Go load generator) that fires a
