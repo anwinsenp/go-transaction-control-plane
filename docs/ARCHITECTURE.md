@@ -70,11 +70,13 @@ flowchart LR
    circuit-breaker-guarded storage layer, with connection pooling sized
    deliberately for the write/read concurrency this service expects.
 5. In parallel, the custom `TradingTenant` operator watches Kafka consumer
-   lag and processor P99 latency per tenant and reconciles each
-   `TradingTenant` resource: scaling replicas, isolating a tenant onto a
-   dedicated node pool, or flagging a downstream bottleneck as `Degraded`,
-   depending on which signals are elevated. See
-   [DESIGN-operator.md](DESIGN-operator.md) for the full decision table.
+   lag, processor P99 latency, and partition count per tenant, and
+   reconciles each `TradingTenant` resource: scaling replicas whenever
+   there's still Kafka-side headroom to do so, falling back to isolating a
+   tenant onto a dedicated node pool only once it's out of that headroom,
+   or flagging a downstream bottleneck as `Degraded`, depending on which
+   signals are elevated. See [DESIGN-operator.md](DESIGN-operator.md) for
+   the full decision table.
 6. All three services (ingestion, processor, operator) export Prometheus
    metrics on `/metrics`; Grafana dashboards and Alertmanager rules built on
    top of those metrics are checked into the repo as code.

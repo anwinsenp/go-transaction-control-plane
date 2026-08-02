@@ -35,6 +35,7 @@ to a single replica-count number.
 | `state` | enum: `Stable` \| `Scaling` \| `Isolated` \| `Degraded` | See decision table below. |
 | `observedKafkaLag` | int64 | Most recently observed consumer lag for this tenant's partitions. |
 | `observedP99Ms` | int32 | Most recently observed processor P99 latency for this tenant. |
+| `observedPartitionCount` | int32 | Partition count of this tenant's Kafka topic, most recently observed. Used against `currentReplicas` to determine whether there's still Kafka-side parallelism headroom before falling back to isolation. |
 | `lastReconcileTime` | metav1.Time | Timestamp of the most recent reconcile pass, updated every pass regardless of whether action was taken. |
 
 Status is updated via the status subresource only. Reconcile logic never
@@ -46,29 +47,42 @@ and act, not to mutate the desired state it's reconciling against.
 
 For each `TradingTenant`, the reconciler classifies `observedKafkaLag`
 against `scaling.kafkaLagThreshold` and `observedP99Ms` against
-`scaling.p99LatencyThresholdMs`, each as high/normal, then takes one of four
-actions:
+`scaling.p99LatencyThresholdMs`, each as high/normal, then takes one of five
+actions. The lag-high/latency-normal case is not a single branch: it splits
+on whether the tenant still has unused Kafka-side parallelism
+(`currentReplicas` vs `observedPartitionCount`), checked in order.
 
-| Lag | Latency | Diagnosis | Action | Resulting `state` |
-|---|---|---|---|---|
-| High | High | Genuine under-capacity | Scale up `currentReplicas`, bounded by `maxReplicas` | `Scaling` |
-| High | Normal | Noisy-neighbor / partition-skew (not a capacity problem) | Set `isolation.dedicatedNodePool: true`; do not change replica count | `Isolated` |
-| Normal | High | Likely a downstream (Postgres) bottleneck that more replicas won't fix | No scaling action; surface for investigation | `Degraded` |
-| Normal | Normal | Healthy | No action | `Stable` |
+| Lag | Latency | Sub-case | Diagnosis | Action | Resulting `state` |
+|---|---|---|---|---|---|
+| High | High | — | Genuine under-capacity | Scale up `currentReplicas`, bounded by `maxReplicas` | `Scaling` |
+| High | Normal | `currentReplicas < observedPartitionCount` | Backlog building but still Kafka-side headroom to add consumers | Scale up `currentReplicas` first, bounded by `maxReplicas` and `observedPartitionCount` | `Scaling` |
+| High | Normal | `currentReplicas >= observedPartitionCount` | At partition parity already; noisy-neighbor / partition-skew, not a capacity problem | Set `isolation.dedicatedNodePool: true`; do not change replica count; flag for manual review of the tenant's partitioning key | `Isolated` |
+| Normal | High | — | Likely a downstream (Postgres) bottleneck that more replicas won't fix | No scaling action; surface for investigation | `Degraded` |
+| Normal | Normal | — | Healthy | No action | `Stable` |
 
 Notes on the branches:
 
-- The scale-up branch clamps at `maxReplicas`: if the tenant is already at
-  `maxReplicas` and lag/latency are both still high, `state` stays
-  `Scaling` (or could be considered `Degraded` in a future revision) but no
-  further replica increase is attempted; this repo's initial cut treats
-  "already at max" as a no-further-action case within the `Scaling` state
-  rather than introducing a fifth state.
-- The isolation branch is one-directional in this initial design: once
-  `dedicatedNodePool` is set `true`, the reconciler does not automatically
-  revert it back to `false` on a single normal reading, to avoid flapping a
-  tenant on and off a dedicated node pool. Reverting isolation is a
-  deliberate operational action, not an automatic one.
+- The scale-up branch (both the high/high case and the headroom sub-case of
+  high/normal) clamps at `maxReplicas`: if the tenant is already at
+  `maxReplicas` and its signals still call for scaling, `state` stays
+  `Scaling` but no further replica increase is attempted; this repo's
+  initial cut treats "already at max" as a no-further-action case within
+  the `Scaling` state rather than introducing a sixth state.
+- The high/normal branch is checked against `observedPartitionCount` before
+  isolation is considered: adding a replica beyond the tenant's partition
+  count creates an idle consumer, not more throughput, since Kafka never
+  assigns more than one consumer per partition within a group. So scaling
+  is always attempted first while there's still partition headroom;
+  isolation only fires once `currentReplicas >= observedPartitionCount`,
+  i.e. once scaling genuinely can't help anymore.
+- The isolation branch (the no-headroom sub-case) is one-directional in
+  this initial design: once `dedicatedNodePool` is set `true`, the
+  reconciler does not automatically revert it back to `false`, regardless
+  of which sub-case triggered isolation or how many subsequent reconcile
+  passes read a normal lag/latency pair. Reverting isolation is always a
+  deliberate operational action, never automatic, to avoid flapping a
+  tenant on and off a dedicated node pool whose metrics sit near the
+  threshold.
 - The `Degraded` branch never scales: adding processor replicas doesn't
   fix a bottleneck downstream of the processor (e.g. Postgres write
   contention), so scaling would just add load without addressing the cause.
@@ -91,27 +105,33 @@ stateDiagram-v2
     [*] --> Stable
 
     Stable --> Scaling: lag high AND latency high
-    Stable --> Isolated: lag high AND latency normal
+    Stable --> Scaling: lag high AND latency normal AND replicas < partitions
+    Stable --> Isolated: lag high AND latency normal AND replicas >= partitions
     Stable --> Degraded: latency high AND lag normal
 
     Scaling --> Scaling: lag high AND latency high (below maxReplicas)
+    Scaling --> Scaling: lag high AND latency normal AND replicas < partitions
     Scaling --> Stable: both normal
-    Scaling --> Isolated: lag high AND latency normal
+    Scaling --> Isolated: lag high AND latency normal AND replicas >= partitions
     Scaling --> Degraded: latency high AND lag normal
 
-    Isolated --> Isolated: lag high AND latency normal
     Isolated --> Scaling: lag high AND latency high
+    Isolated --> Scaling: lag high AND latency normal AND replicas < partitions
+    Isolated --> Isolated: lag high AND latency normal AND replicas >= partitions
     Isolated --> Degraded: latency high AND lag normal
     Isolated --> Isolated: both normal (isolation does not auto-revert)
 
     Degraded --> Stable: both normal
     Degraded --> Scaling: lag high AND latency high
-    Degraded --> Isolated: lag high AND latency normal
+    Degraded --> Scaling: lag high AND latency normal AND replicas < partitions
+    Degraded --> Isolated: lag high AND latency normal AND replicas >= partitions
     Degraded --> Degraded: latency high AND lag normal
 ```
 
-This diagram and the decision table above describe the same four
-transitions; any future change to one must be reflected in the other.
+This diagram and the decision table above describe the same five
+transitions (the lag-high/latency-normal case splits into a scale-up and
+an isolate transition depending on partition headroom); any future change
+to one must be reflected in the other.
 
 ## Idempotency and reconcile safety
 
@@ -137,7 +157,9 @@ transitions; any future change to one must be reflected in the other.
 ## Testing approach
 
 Tests use `controller-runtime`'s fake client with one case per decision
-table branch (four minimum: scale-up, isolate, degraded, stable), plus an
+table branch (five minimum: scale-up on lag+latency high, scale-up on
+lag-high/latency-normal with partition headroom, isolate on
+lag-high/latency-normal at partition parity, degraded, stable), plus an
 explicit idempotency test that calls `Reconcile` twice against the same
 object state and asserts the resulting `status` is identical on both
 passes.
