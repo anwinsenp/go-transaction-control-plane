@@ -27,9 +27,10 @@ since they have different audiences and different content.
 
 ## When asked to update ARCHITECTURE.md (HLD)
 Keep it free of implementation detail. Include: problem statement, explicit
-goals *and* non-goals, a system diagram (ASCII or Mermaid), the short list
-of major trade-offs with one-line rationale each (not full ADR detail —
-link to the ADR instead), and data flow at the service-to-service level.
+goals *and* non-goals, a system diagram (Mermaid `flowchart`/`graph` — see
+diagramming rule below), the short list of major trade-offs with one-line
+rationale each (not full ADR detail — link to the ADR instead), and data
+flow at the service-to-service level.
 Do not include function signatures, schema DDL, or specific algorithms —
 those belong in a DESIGN doc.
 
@@ -40,6 +41,10 @@ tables or algorithms written out explicitly (not just described in prose —
 if there's branching logic, show the branches), edge cases and error
 handling, and a short "why not X" section for any non-obvious design choice
 made in this area, referencing the relevant ADR by number if one exists.
+If the area has state-machine-like behavior (e.g. an operator's reconcile
+states), include a Mermaid `stateDiagram-v2` alongside the prose decision
+table — the diagram and the table should agree; don't let them drift into
+describing different things.
 
 ## When asked to add an ADR
 Use this format, one file per decision, `docs/decisions/NNNN-title-slug.md`
@@ -78,6 +83,18 @@ was there from the start.
 - Cross-link: ARCHITECTURE.md should link to its DESIGN docs and relevant
   ADRs; DESIGN docs should link back to ARCHITECTURE.md and any ADR that
   justifies a non-obvious choice.
+- **All diagrams must be Mermaid code blocks (` ```mermaid `), never ASCII
+  art or exported images.** Mermaid renders natively on github.com,
+  stays diffable in PR review, and can't silently drift out of sync the
+  way an exported PNG can. Use `flowchart`/`graph` for system/component
+  diagrams, `stateDiagram-v2` for any state-machine-like behavior (e.g. an
+  operator's reconcile states), and `sequenceDiagram` for a specific
+  multi-step interaction (e.g. one event's path through several services).
+  Stick to Mermaid's default styling — custom `style`/color directives can
+  break under GitHub's automatic light/dark theme switching. Only fall back
+  to an exported SVG (checked in alongside its editable source file, e.g.
+  `.excalidraw`) if the diagram is something Mermaid genuinely can't
+  express — this should be rare.
 
 ### Maintaining README.md's Documentation table
 The README must have a `## Documentation` section, placed after the intro
