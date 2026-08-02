@@ -6,6 +6,13 @@ Postgres-backed reconciliation layer, a custom Kubernetes operator for
 tenant-aware scaling, and Prometheus/Grafana telemetry, deployed to a
 public sandbox for demonstration.
 
+**Status:** Design complete, implementation in progress. See
+[Architecture](docs/ARCHITECTURE.md) for the full design. Code is being
+built incrementally against the tracked issues in this repo.
+
+**Stack:** Go · Kafka (Strimzi) · PostgreSQL/Aurora · Kubernetes
+(`controller-runtime`) · Prometheus/Grafana · Terraform · AWS (ECS/EKS)
+
 ## Documentation
 
 | Doc | What's in it |
@@ -15,3 +22,7 @@ public sandbox for demonstration.
 | [Operator design](docs/DESIGN-operator.md) | `TradingTenant` CRD spec and reconcile decision logic |
 | [Operator alerts runbook](docs/RUNBOOK-operator-alerts.md) | Per-alert diagnosis and action steps for scaling, noisy-neighbor isolation, and downstream bottleneck alerts |
 | [Architecture decisions](docs/decisions/) | Log of significant design decisions with rationale |
+
+## License
+
+[MIT](LICENSE)
