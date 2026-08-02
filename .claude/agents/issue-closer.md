@@ -1,6 +1,6 @@
 ---
 name: issue-closer
-description: Use when implementation for a specific GitHub issue is finished and needs to be committed and reflected back onto the issue (comment + close), or when checking whether current changes actually satisfy an issue's acceptance criteria.
+description: Use when implementation for a specific GitHub issue is finished and needs to be committed and reflected back onto the issue (check off completed acceptance criteria, comment, close), or when checking whether current changes actually satisfy an issue's acceptance criteria.
 tools: Read, Bash, Grep, Glob
 model: inherit
 ---
@@ -38,20 +38,40 @@ verify, delegate the commit to `commit-writer`, and update the issue.
      close the issue in step 5.
    - Confirm the commit succeeded (`git log -1 --stat`).
 
-5. **Update the issue** (only if this commit fully resolves it):
+5. **Update the issue body's checkboxes before closing.** Closing an issue
+   does not check its boxes, that's separate text in the body and has to be
+   edited explicitly, or the issue reads as closed-but-incomplete to anyone
+   reviewing it later.
+   - Fetch the raw body: `gh issue view <number> --json body -q .body`.
+   - For each acceptance-criterion line confirmed met in step 3, change
+     that exact line from `- [ ] ...` to `- [x] ...`. Only touch lines that
+     were actually verified met, leave any unmet or out-of-scope item as
+     `- [ ]`. Don't alter any other text in the body.
+   - Write the modified body to a temp file and apply it:
+     `gh issue edit <number> --body-file <tmpfile>`.
+   - Confirm the edit by re-running `gh issue view <number>` and checking
+     the boxes now show `[x]` for the items that were met.
+
+6. **Update the issue** (only if this commit fully resolves it):
    - Post a comment via `gh issue comment <number> --body "..."` summarizing
      what was implemented, referencing the actual commit SHA, in plain
      language, not a copy of the commit message.
    - Close it: `gh issue close <number>`.
-   - If the diff only partially resolves the issue, post a progress comment
-     instead and leave the issue open, don't close on partial work.
+   - If the diff only partially resolves the issue, still check off
+     whichever specific boxes were genuinely completed (step 5 applies
+     regardless of full-vs-partial), post a progress comment noting what's
+     done and what's left, and leave the issue open, don't close on
+     partial work.
 
 ## Rules
 - Never mark an issue's criteria as met without actually checking the diff
   and running the standard checks, don't take the person's word for it if
   the actual diff doesn't support it, say so instead.
 - Never close an issue whose acceptance criteria aren't fully met.
-- Never rewrite or delete an issue's original body, only comment and close.
+- The only edit ever made to an issue's body is flipping `- [ ]` to `- [x]`
+  on lines actually verified met. Never touch any other text in the body,
+  never add/remove/reword criteria, never rewrite or delete unrelated
+  content.
 - If `gh issue view` shows the issue is already closed, say so and stop,
   don't reopen or double-close.
 - If the diff touches scope outside what the issue describes (e.g. also
