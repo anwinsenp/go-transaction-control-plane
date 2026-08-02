@@ -62,45 +62,92 @@ deployed to a public sandbox for demonstration.
   (`kafkaLagThreshold`, `p99LatencyThresholdMs`), `isolation.dedicatedNodePool`
   (bool, set by the operator, not the user). Status fields:
   `currentReplicas`, `state` (`Stable`/`Scaling`/`Isolated`/`Degraded`),
-  `observedKafkaLag`, `observedP99Ms`, `lastReconcileTime`.
+  `observedKafkaLag`, `observedP99Ms`, `observedPartitionCount`,
+  `lastReconcileTime`.
 - Reconciler loop (via `controller-runtime`) implementing joint-signal
-  decision logic — not a single-metric threshold (that's just HPA
+  decision logic, not a single-metric threshold (that's just HPA
   reimplemented). For each `TradingTenant`, evaluate consumer lag and P99
   latency together:
-  - **Lag high AND latency high** → genuine under-capacity → scale up
+  - **Lag high AND latency high**: genuine under-capacity. Scale up
     (bounded by `maxReplicas`).
-  - **Lag high AND latency normal** → noisy-neighbor / partition-skew
-    pattern, not a capacity problem → isolate onto a dedicated node pool
-    (set `isolation.dedicatedNodePool: true`) instead of blindly adding
-    replicas.
-  - **Latency high AND lag normal** → likely a downstream (Postgres)
-    bottleneck that adding replicas won't fix → set `state: Degraded`,
-    don't scale, surface for investigation rather than masking it.
-  - **Both normal** → `state: Stable`, no action.
+  - **Lag high AND latency normal**: backlog is building but each item
+    still processes fast once picked up, so this is a queue-depth problem,
+    not a per-item slowness problem. Two distinct sub-cases, checked in
+    order:
+    1. If `currentReplicas < observedPartitionCount` (there's still
+       Kafka-side parallelism headroom): scale up consumer replicas first,
+       same as the high/high branch, bounded by `maxReplicas` and by
+       `observedPartitionCount` (adding a replica beyond partition count
+       adds an idle consumer, not more throughput).
+    2. If `currentReplicas >= observedPartitionCount` (already at
+       partition parity, no more Kafka-side parallelism available): this
+       is the noisy-neighbor / partition-skew case. More replicas can't
+       help since Kafka can't hand out more than one consumer per
+       partition. Isolate onto a dedicated node pool
+       (`isolation.dedicatedNodePool: true`) instead, and flag for manual
+       review of the tenant's partitioning key (skewed key hashing is a
+       common root cause and needs a human to fix, the operator can only
+       contain the symptom).
+  - **Latency high AND lag normal**: likely a downstream (Postgres)
+    bottleneck that adding replicas won't fix, since the bottleneck sits
+    outside the operator's authority (compute/replicas), not inside it.
+    Set `state: Degraded`, don't scale, surface for investigation rather
+    than masking it.
+  - **Both normal**: `state: Stable`, no action.
   - Default behavior for most tenants is the shared pool with resource
-    quotas; escalation to `dedicatedNodePool: true` is the exception path
-    for tenants whose signals indicate a genuine isolation need, not the
-    default for every tenant (mirrors how real multi-tenant trading
-    platforms tier clients rather than isolating everyone by default).
+    quotas. Escalation to `dedicatedNodePool: true` is the exception path
+    for tenants whose signals indicate a genuine isolation need after
+    Kafka-side scaling headroom is exhausted, not the default for every
+    tenant (mirrors how real multi-tenant trading platforms tier clients
+    rather than isolating everyone by default). The operator does not
+    auto-revert a tenant out of isolation once set; reverting
+    `dedicatedNodePool` to `false` is a manual step once the root cause
+    (repartitioning, quota adjustment) has actually been addressed, to
+    avoid thrashing a tenant back and forth if its metrics sit right at
+    the threshold.
 - Reconcile must be idempotent and safe to call repeatedly with the same
   object state; bounded context on any external call.
 - Status subresource updates kept separate from spec mutation.
 - Tests using `controller-runtime`'s fake client, with one test case per
-  branch of the decision table above (four cases minimum), plus an explicit
-  idempotency test (reconcile twice, assert same end state).
+  branch of the decision table above, including both lag-high/latency-normal
+  sub-cases (five cases minimum total), plus an explicit idempotency test
+  (reconcile twice, assert same end state).
 
 ## Telemetry (`/internal/metrics`, or wherever instrumentation lives)
 - Prometheus metrics exported via `client_golang` on `/metrics` per service:
   transaction throughput (counter), P50/P99 latency (histogram), Kafka
-  consumer lag (gauge), operator reconcile loop duration (histogram),
-  circuit breaker state (gauge, per breaker).
+  consumer lag (gauge), Kafka partition count and active consumer count per
+  tenant topic (gauges, feeding the operator's partition-headroom check),
+  operator reconcile loop duration (histogram), circuit breaker state
+  (gauge, per breaker).
 - No high-cardinality labels (no raw transaction/tenant IDs on metrics).
 - Grafana dashboard definition (as code/JSON, checked into the repo) showing
   the above metrics.
-- Alert rules (Prometheus Alertmanager or Grafana alerting) for: P99 latency
-  breach, Kafka consumer lag growing unbounded, circuit breaker open longer
-  than a threshold. Dashboards alone only show state; alerting demonstrates
-  actual operational maturity.
+- Alert rules (Prometheus Alertmanager or Grafana alerting), including at
+  minimum:
+  - `TenantScalingEvent` (info, no page): fires when a `TradingTenant`
+    transitions to `Scaling`. Used for trend visibility, not response.
+  - `TenantAtMaxReplicasWithGrowingLag` (warning): fires when a tenant is at
+    `maxReplicas` and `observedKafkaLag` is still increasing over the
+    reconcile window. Signals automatic scaling has hit its ceiling.
+  - `TenantIsolatedNoisyNeighborSuspected` (warning, escalate to critical if
+    lag keeps growing post-isolation): fires when a `TradingTenant`
+    transitions to `Isolated` (lag high, latency normal, already at
+    partition parity). This is the alert that pages an SRE, since it means
+    the operator has reached the edge of its own authority (it can contain
+    the symptom via isolation but cannot repartition Kafka or diagnose root
+    cause) and a human decision is required.
+  - `TenantDegradedDownstreamBottleneck` (warning): fires when a
+    `TradingTenant` transitions to `Degraded` (latency high, lag normal).
+    Same handoff logic: the operator deliberately takes no scaling action
+    here since the bottleneck is outside its authority (likely Postgres).
+  - Standard: P99 latency breach, Kafka consumer lag growing unbounded,
+    circuit breaker open longer than a threshold.
+  - Every alert carries a `runbook_url` annotation pointing at the
+    relevant section of `docs/RUNBOOK-operator-alerts.md`, so a paged SRE
+    lands directly on diagnosis steps rather than reconstructing them at
+    2am. Dashboards alone only show state; alerting with a linked runbook
+    is what demonstrates actual operational maturity.
 
 ## Local development environment
 - `docker-compose.yml` bringing up Kafka and Postgres locally, so
@@ -135,6 +182,9 @@ deployed to a public sandbox for demonstration.
 - README: architecture diagram, the "why" behind key trade-offs (e.g.
   ECS/Kinesis vs. Lambda for cold-start avoidance), public sandbox URL,
   Grafana dashboard link, how to run the load-test script.
+- `docs/RUNBOOK-operator-alerts.md`: diagnosis and action steps for each
+  `TradingTenant` alert (isolation, degraded, at-max-replicas), linked from
+  every relevant alert's `runbook_url` annotation.
 - Embed or link the architecture walkthrough video (if/when recorded) at the
   top of the README.
 
