@@ -7,8 +7,9 @@ CREATE TABLE transactions (
     -- causing random-UUID page splits on the primary key's btree.
     id              BIGSERIAL PRIMARY KEY,
     -- Idempotency key carried on the Kafka payload; the processor's
-    -- at-least-once redelivery relies on this UNIQUE constraint to make
-    -- duplicate inserts a no-op (ON CONFLICT DO NOTHING) rather than
+    -- at-least-once redelivery relies on this UNIQUE constraint to reject
+    -- duplicate inserts, which TransactionStore.Insert catches (Postgres
+    -- error 23505) and maps to ledger.ErrDuplicateEvent rather than
     -- double-counting.
     event_id        UUID NOT NULL UNIQUE,
     tenant_id       TEXT NOT NULL,
