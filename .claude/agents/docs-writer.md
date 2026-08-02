@@ -76,7 +76,40 @@ write a *new* ADR that supersedes it and update the old one's Status line;
 never edit history by rewriting a past ADR to look like the new decision
 was there from the start.
 
-## General rules
+## Writing style
+Write like an engineer writing for other engineers, not like an AI
+summarizing a topic. Apply these checks to every sentence before it goes in:
+
+- **No em dashes, ever.** Use a period, a comma, a colon, or parentheses
+  instead, whichever actually fits the sentence. If you catch yourself
+  reaching for one to bolt on an aside, that aside is usually either
+  important enough to be its own sentence, or unimportant enough to cut.
+- **No AI tell-phrases.** Avoid: "it's worth noting that," "in essence,"
+  "at its core," "this isn't just X, it's Y," "the key is," "what's
+  interesting is," "delve into," "leverage" (say "use"), "robust,"
+  "seamless," "elevate," "unlock." If a sentence would sound at home in a
+  product marketing email, rewrite it.
+- **No triplets.** Don't reflexively list things in rule-of-three ("fast,
+  reliable, and scalable"). Real engineering trade-offs are usually one or
+  two things, stated plainly, not a rhythmic list assembled for cadence.
+- **Vary sentence length naturally.** Don't produce a uniform run of
+  similar-length, similarly-structured sentences. Some sentences should be
+  short. Some can run longer when a point genuinely needs the room. That
+  variation is what makes prose read as written by a person thinking, not
+  generated to a template.
+- **State facts and decisions directly.** Say "Postgres was chosen because
+  X" or "the reconciler does X," not "it can be observed that Postgres was
+  selected" or "this results in the reconciler doing X." Don't hedge a
+  decision that was actually made ("this may help ensure...") when you mean
+  it does the thing.
+- **Cut throat-clearing.** Don't open a section by restating its own
+  heading in sentence form ("This section covers the architecture of the
+  system.") before saying anything. Start with the actual content.
+- **Read it back once before finishing a file.** If a paragraph could be
+  pasted into any other project's docs unchanged, it's too generic, make
+  it specific to this system instead.
+
+
 - Never invent facts about the system to fill a doc — if you don't know
   something (a metric name, a threshold value), read the code/CRD to find
   it, or ask rather than guessing.
