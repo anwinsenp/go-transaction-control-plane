@@ -103,5 +103,6 @@ flowchart LR
 | Doc | Scope |
 |---|---|
 | [DESIGN-operator.md](DESIGN-operator.md) | `TradingTenant` CRD spec and reconcile decision logic |
-| [DESIGN-ingestion.md](DESIGN-ingestion.md) | Ingestion hot-path allocation strategy, backpressure, circuit breaker |
+| [DESIGN-ingestion.md](DESIGN-ingestion.md) | Ingestion hot-path allocation strategy, gRPC/REST transports, backpressure, circuit breaker |
+| [DESIGN-ledger.md](DESIGN-ledger.md) | Ledger domain types and the fixed-point `int64` amount representation |
 | [decisions/](decisions/) | ADR log |

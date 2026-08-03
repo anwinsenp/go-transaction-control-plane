@@ -3,7 +3,56 @@
 This is the low-level design for the ingestion hot path: the public
 gRPC/REST endpoint that accepts mock transaction events and publishes them
 to Kafka. For where this fits in the overall system, see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). For the fixed-point representation of
+`quantity`/`price` referenced throughout this doc, see
+[DESIGN-ledger.md](DESIGN-ledger.md).
+
+## Transports: REST and gRPC
+
+`cmd/ingestion/main.go` starts two transports against the same
+`ingestion.Publisher`, one HTTP (`api.NewServer`, REST) and one gRPC
+(`api.NewGRPCServer`), listening on independently configurable addresses
+(`HTTP_ADDR`, default `:8080`; `GRPC_ADDR`, default `:9090`). Both run for
+the lifetime of the process; there's no primary/fallback relationship
+between them, a caller picks whichever transport fits its stack.
+
+- **Lifecycle coupling.** The two servers are started in separate
+  goroutines against a shared `runCtx`. If either server fails to start
+  (anything other than the graceful-shutdown sentinel errors,
+  `http.ErrServerClosed` / `grpc.ErrServerStopped`), a `sync.Once`-guarded
+  `recordStartErr` cancels `runCtx`, which unblocks the main goroutine and
+  triggers shutdown of both servers, not just the one that failed. A
+  startup failure on one transport never leaves the other's listener and
+  goroutine running unsupervised.
+- **Shutdown budget.** Both `Shutdown` calls run concurrently against the
+  same `shutdownTimeout`-bound context, in separate goroutines joined with
+  a `sync.WaitGroup`, rather than sequentially. Running them sequentially
+  would let a slow HTTP drain eat into the gRPC server's share of the
+  shutdown budget (or vice versa); running them concurrently means each
+  gets the full `shutdownTimeout` to drain in-flight requests/RPCs.
+- **gRPC health checking.** `GRPCServer` registers the standard gRPC
+  health checking protocol (`grpc_health_v1`) alongside the ingestion
+  service, reporting `SERVING` for both the empty service name (overall
+  server health) and `ingestion.v1.TransactionIngestionService`
+  specifically. `Shutdown` calls `health.Server.Shutdown()` first, which
+  flips every registered service to `NOT_SERVING` so a load balancer polling
+  the health check stops routing new traffic to this instance before
+  `GracefulStop` starts draining in-flight RPCs. The REST server has no
+  equivalent liveness/readiness endpoint yet.
+- **Validation is duplicated per transport, not shared.** REST validates a
+  `TransactionEventRequest` (JSON, amount fields as decimal strings);
+  gRPC's `transactionIngestionServer.IngestTransaction` validates a
+  generated `*ingestionv1.TransactionEvent` (already-typed proto fields,
+  amount fields as pre-scaled `int64`). The two validation functions
+  (`TransactionEventRequest.validate` and `validateTransactionEvent`)
+  enforce the same rules but can't share an implementation because they
+  operate on different wire types; keeping them in sync when a validation
+  rule changes is a manual responsibility, not one enforced by the
+  compiler.
+- **Error mapping.** REST maps validation failures to `400`/`422` and a
+  publish failure to `503` (see below). gRPC maps validation failures to
+  `codes.InvalidArgument` and a publish failure to `codes.Unavailable`,
+  the closest gRPC status equivalents.
 
 ## Zero-allocation strategy
 
@@ -66,6 +115,30 @@ not the JSON decode work itself. allocs/op scaling with the size of
 after) is expected: `isValidTenantID`/`isValidInstrument` iterate the
 field's runes but don't allocate, so the delta comes from `json.Decoder`
 and `strconv`/`decimal` parsing paths, not from validation itself.
+
+`BenchmarkTransactionIngestionServer_IngestTransaction` in
+`internal/api/grpc_transaction_handler_test.go` covers the gRPC handler's
+own validate -> convert -> publish path, calling `IngestTransaction`
+directly rather than over a network connection, so it isolates the
+handler's allocation behavior from gRPC transport/codec overhead (unlike
+`BenchmarkTransactionHandler`, which includes `httptest` scaffolding). Run
+under the same conditions as above:
+
+| Payload            | ns/op | B/op | allocs/op |
+|--------------------|------:|-----:|----------:|
+| typical             | 167.3 | 830 | 1 |
+| min-length fields   | 104.8 | 710 | 1 |
+| max-length fields   | 118.0 | 861 | 1 |
+
+The gRPC path allocates far less than the REST path (1 `allocs/op` vs. ~50)
+for two reasons that are structural, not incidental: gRPC's request is
+already a decoded, typed Go struct handed in by `grpc-go` before
+`IngestTransaction` runs, so there's no JSON decode step to benchmark; and
+`quantity`/`price` arrive as already-scaled `int64` wire values (see
+[DESIGN-ledger.md](DESIGN-ledger.md)), so there's no `ParseAmount` string
+parsing on this path either. The one remaining allocation is the returned
+`*ingestionv1.IngestTransactionResponse` itself, which escapes to the heap
+because it's returned as a pointer across the gRPC handler boundary.
 
 ## Request validation and rejection
 
