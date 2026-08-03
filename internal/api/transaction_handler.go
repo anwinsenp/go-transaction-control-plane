@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +19,52 @@ import (
 // transaction event, which is expected to be a small, fixed-shape JSON
 // object.
 const maxTransactionEventBytes = 4 << 10
+
+// transactionBodyPool reuses request-body buffers on the ingestion hot
+// path instead of letting json.Decoder allocate a fresh scan buffer per
+// request.
+var transactionBodyPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, maxTransactionEventBytes))
+	},
+}
+
+// jsonResponseCodec pairs a reusable buffer with the json.Encoder bound to
+// it, so the encoder (and its boxing of the underlying writer) isn't
+// rebuilt on every response.
+type jsonResponseCodec struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var jsonResponsePool = sync.Pool{
+	New: func() any {
+		buf := bytes.NewBuffer(make([]byte, 0, maxTransactionEventBytes))
+		return &jsonResponseCodec{buf: buf, enc: json.NewEncoder(buf)}
+	},
+}
+
+// writeJSON encodes value into a pooled buffer and writes it as a JSON
+// response with the given status code.
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	codec := jsonResponsePool.Get().(*jsonResponseCodec)
+	defer func() {
+		codec.buf.Reset()
+		jsonResponsePool.Put(codec)
+	}()
+
+	if err := codec.enc.Encode(value); err != nil {
+		log.Printf("encode json response: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if _, err := w.Write(codec.buf.Bytes()); err != nil {
+		log.Printf("write json response: %v", err)
+	}
+}
 
 // maxDecimalMagnitude bounds quantity and price so a malformed or
 // malicious payload (e.g. "1e400") can't reach the ledger's decimal
@@ -50,9 +98,21 @@ type errorResponse struct {
 // It does not yet publish to Kafka or write to the ledger — that logic
 // lands with the hot-path ingestion work.
 func transactionHandler(w http.ResponseWriter, r *http.Request) {
-	var event TransactionEventRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxTransactionEventBytes)
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+
+	body := transactionBodyPool.Get().(*bytes.Buffer)
+	defer func() {
+		body.Reset()
+		transactionBodyPool.Put(body)
+	}()
+
+	if _, err := body.ReadFrom(r.Body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var event TransactionEventRequest
+	if err := json.NewDecoder(bytes.NewReader(body.Bytes())).Decode(&event); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -62,11 +122,7 @@ func transactionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(event); err != nil {
-		log.Printf("encode transaction response: %v", err)
-	}
+	writeJSON(w, http.StatusAccepted, event)
 }
 
 // validate reports the first invalid or missing field in event, or nil if
@@ -167,9 +223,5 @@ func isUpperAlphanumeric(char rune) bool {
 
 // writeJSONError writes a JSON error body with the given HTTP status.
 func writeJSONError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(errorResponse{Error: message}); err != nil {
-		log.Printf("encode error response: %v", err)
-	}
+	writeJSON(w, status, errorResponse{Error: message})
 }
