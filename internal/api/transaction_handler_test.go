@@ -613,25 +613,58 @@ func TestWriteJSONEncodeFailureReturnsErrorStatus(t *testing.T) {
 }
 
 // BenchmarkTransactionHandler reports allocs/op for a full request/response
-// round trip through transactionHandler, including httptest.NewRequest and
-// httptest.NewRecorder scaffolding allocated fresh each iteration. That
-// scaffolding overhead is mixed into the reported number alongside the
-// handler's own allocations, so this is not a pure hot-path allocation
-// figure for the handler in isolation.
+// round trip through transactionHandler (decode -> validate -> publish),
+// including httptest.NewRequest and httptest.NewRecorder scaffolding
+// allocated fresh each iteration. That scaffolding overhead is mixed into
+// the reported number alongside the handler's own allocations, so this is
+// not a pure hot-path allocation figure for the handler in isolation.
+//
+// Sub-benchmarks cover the realistic range of payload sizes validation
+// allows for the two variable-length fields (tenant_id: 1-64 chars,
+// instrument: 1-16 chars), since allocation behavior on the JSON decode and
+// publish path can vary with payload size.
 func BenchmarkTransactionHandler(b *testing.B) {
-	payload, err := json.Marshal(validTransactionEvent())
-	if err != nil {
-		b.Fatalf("marshal event: %v", err)
+	tests := []struct {
+		name  string
+		event TransactionEventRequest
+	}{
+		{
+			name:  "typical",
+			event: validTransactionEvent(),
+		},
+		{
+			name: "min_length_fields",
+			event: withMutation(validTransactionEvent(), func(event *TransactionEventRequest) {
+				event.TenantID = "a"
+				event.Instrument = "A"
+			}),
+		},
+		{
+			name: "max_length_fields",
+			event: withMutation(validTransactionEvent(), func(event *TransactionEventRequest) {
+				event.TenantID = strings.Repeat("a", 64)
+				event.Instrument = strings.Repeat("A", 16)
+			}),
+		},
 	}
-	body := string(payload)
-	handler := newTransactionHandler(&fakePublisher{})
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		request := httptest.NewRequest(http.MethodPost, "/v1/transactions", strings.NewReader(body))
-		recorder := httptest.NewRecorder()
-		handler(recorder, request)
+	for _, testCase := range tests {
+		b.Run(testCase.name, func(b *testing.B) {
+			payload, err := json.Marshal(testCase.event)
+			if err != nil {
+				b.Fatalf("marshal event: %v", err)
+			}
+			body := string(payload)
+			handler := newTransactionHandler(&fakePublisher{})
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				request := httptest.NewRequest(http.MethodPost, "/v1/transactions", strings.NewReader(body))
+				recorder := httptest.NewRecorder()
+				handler(recorder, request)
+			}
+		})
 	}
 }
 

@@ -34,6 +34,39 @@ described in `CLAUDE.md`. The strategy:
   change, and treat a benchmark showing new `allocs/op` on this path as a
   regression to explain or fix, not to note and move past.
 
+### Benchmark results
+
+`BenchmarkTransactionHandler` in `internal/api/transaction_handler_test.go`
+covers the full decode -> validate -> publish hot path (publish goes to an
+in-process `ingestion.Publisher` test double, not a live Kafka broker) end
+to end through the real HTTP handler, with sub-benchmarks for the range of
+payload sizes validation allows on the two variable-length fields
+(`tenant_id`: 1-64 chars, `instrument`: 1-16 chars). Reported figures
+include `httptest.NewRequest`/`httptest.NewRecorder` scaffolding allocated
+fresh per iteration, so they aren't a pure figure for the handler in
+isolation, but they're consistent across the before/after runs below.
+
+"Before" is commit `b189903` (publish path landed, request/response buffer
+pooling already in place, decoder/reader/event-struct pooling not yet
+added). "After" is the current `sync.Pool`-backed decoder path (commit
+`9f69405`). Run with `go test ./internal/api/... -bench=BenchmarkTransactionHandler
+-benchmem -run='^$' -benchtime=2s` on Apple M5 Pro / darwin/arm64, go1.26.5:
+
+| Payload            | Before: ns/op | Before: B/op | Before: allocs/op | After: ns/op | After: B/op | After: allocs/op |
+|--------------------|--------------:|-------------:|-------------------:|-------------:|------------:|-------------------:|
+| typical             | 2637 | 8806 | 53 | 2697 | 8527 | 50 |
+| min-length fields   | 2670 | 8745 | 51 | 2655 | 8432 | 48 |
+| max-length fields   | 2942 | 8980 | 53 | 3024 | 8653 | 50 |
+
+Decoder-buffer pooling (`9f69405`) cuts 3 allocations and ~275-330 bytes
+per request across all payload sizes; latency (`ns/op`) is flat within
+run-to-run noise, since the pooling change targets allocation count/bytes,
+not the JSON decode work itself. allocs/op scaling with the size of
+`tenant_id`/`instrument` (51 at min length vs. 53 at max, both before and
+after) is expected: `isValidTenantID`/`isValidInstrument` iterate the
+field's runes but don't allocate, so the delta comes from `json.Decoder`
+and `strconv`/`decimal` parsing paths, not from validation itself.
+
 ## Request validation and rejection
 
 - All inbound payloads are validated before any Kafka publish attempt:
