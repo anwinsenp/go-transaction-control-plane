@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
@@ -30,8 +29,8 @@ type Event struct {
 	SchemaVersion int16
 	Instrument    string
 	Side          ledger.Side
-	Quantity      decimal.Decimal
-	Price         decimal.Decimal
+	Quantity      int64 // fixed-point, scaled by ledger.AmountScale
+	Price         int64 // fixed-point, scaled by ledger.AmountScale
 	Currency      string
 	OccurredAt    time.Time
 }

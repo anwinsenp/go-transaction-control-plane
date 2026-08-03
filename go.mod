@@ -5,7 +5,6 @@ go 1.26.5
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/shopspring/decimal v1.4.0
 	github.com/twmb/franz-go v1.21.5
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.11

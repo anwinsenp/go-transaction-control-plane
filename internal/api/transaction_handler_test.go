@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
 
 // fakePublisher is an ingestion.Publisher test double that records the
@@ -284,17 +284,17 @@ func TestTransactionHandler(t *testing.T) {
 		{
 			name: "quantity exactly at max magnitude is accepted",
 			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
-				event.Quantity = "1000000000000000"
+				event.Quantity = "10000000000"
 			})),
 			wantStatus: http.StatusAccepted,
 			wantEvent: withField(func(event *TransactionEventRequest) {
-				event.Quantity = "1000000000000000"
+				event.Quantity = "10000000000"
 			}),
 		},
 		{
 			name: "quantity one unit above max magnitude is rejected",
 			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
-				event.Quantity = "1000000000000001"
+				event.Quantity = "10000000001"
 			})),
 			wantStatus:        http.StatusBadRequest,
 			wantErrorContains: "quantity must be a positive decimal number",
@@ -302,17 +302,17 @@ func TestTransactionHandler(t *testing.T) {
 		{
 			name: "price exactly at max magnitude is accepted",
 			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
-				event.Price = "1000000000000000"
+				event.Price = "10000000000"
 			})),
 			wantStatus: http.StatusAccepted,
 			wantEvent: withField(func(event *TransactionEventRequest) {
-				event.Price = "1000000000000000"
+				event.Price = "10000000000"
 			}),
 		},
 		{
 			name: "price one unit above max magnitude is rejected",
 			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
-				event.Price = "1000000000000001"
+				event.Price = "10000000001"
 			})),
 			wantStatus:        http.StatusBadRequest,
 			wantErrorContains: "price must be a positive decimal number",
@@ -401,11 +401,11 @@ func TestTransactionHandlerPublishesValidatedEvent(t *testing.T) {
 	if string(published.Side) != validEvent.Side {
 		t.Errorf("published Side = %q, want %q", published.Side, validEvent.Side)
 	}
-	if published.Quantity.String() != "10" {
-		t.Errorf("published Quantity = %s, want 10", published.Quantity)
+	if published.Quantity != 10*ledger.AmountScale {
+		t.Errorf("published Quantity = %d, want %d", published.Quantity, 10*ledger.AmountScale)
 	}
-	if published.Price.String() != "150.25" {
-		t.Errorf("published Price = %s, want 150.25", published.Price)
+	if published.Price != 15025000000 {
+		t.Errorf("published Price = %d, want 150.25", published.Price)
 	}
 	if published.Currency != validEvent.Currency {
 		t.Errorf("published Currency = %q, want %q", published.Currency, validEvent.Currency)
@@ -723,20 +723,20 @@ func TestToIngestionEvent(t *testing.T) {
 				t.Errorf("SchemaVersion = %d, want %d", event.SchemaVersion, ingestion.CurrentSchemaVersion)
 			}
 
-			wantQuantity, err := decimal.NewFromString(testCase.request.Quantity)
+			wantQuantity, err := ledger.ParseAmount(testCase.request.Quantity)
 			if err != nil {
 				t.Fatalf("parse want quantity: %v", err)
 			}
-			if !event.Quantity.Equal(wantQuantity) {
-				t.Errorf("Quantity = %s, want %s", event.Quantity, wantQuantity)
+			if event.Quantity != wantQuantity {
+				t.Errorf("Quantity = %d, want %d", event.Quantity, wantQuantity)
 			}
 
-			wantPrice, err := decimal.NewFromString(testCase.request.Price)
+			wantPrice, err := ledger.ParseAmount(testCase.request.Price)
 			if err != nil {
 				t.Fatalf("parse want price: %v", err)
 			}
-			if !event.Price.Equal(wantPrice) {
-				t.Errorf("Price = %s, want %s", event.Price, wantPrice)
+			if event.Price != wantPrice {
+				t.Errorf("Price = %d, want %d", event.Price, wantPrice)
 			}
 
 			wantOccurredAt, err := time.Parse(time.RFC3339, testCase.request.OccurredAt)

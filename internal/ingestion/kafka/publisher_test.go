@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
@@ -50,8 +49,8 @@ func sampleEvent() ingestion.Event {
 		SchemaVersion: ingestion.CurrentSchemaVersion,
 		Instrument:    "AAPL",
 		Side:          ledger.SideBuy,
-		Quantity:      decimal.NewFromInt(10),
-		Price:         decimal.NewFromFloat(150.25),
+		Quantity:      10 * ledger.AmountScale,
+		Price:         15025000000, // 150.25
 		Currency:      "USD",
 		OccurredAt:    occurredAt,
 	}
@@ -90,8 +89,8 @@ func TestPublisherPublishSuccess(t *testing.T) {
 		SchemaVersion: ingestion.CurrentSchemaVersion,
 		Instrument:    "AAPL",
 		Side:          "BUY",
-		Quantity:      "10",
-		Price:         "150.25",
+		Quantity:      "10.00000000",
+		Price:         "150.25000000",
 		Currency:      "USD",
 		OccurredAt:    "2026-08-03T12:00:00Z",
 	}

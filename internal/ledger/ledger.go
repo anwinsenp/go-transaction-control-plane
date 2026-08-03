@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // Side identifies the direction of a trade.
@@ -21,7 +20,8 @@ const (
 	SideSell Side = "SELL"
 )
 
-// Transaction is one row of the append-only trade ledger.
+// Transaction is one row of the append-only trade ledger. Quantity and
+// Price are fixed-point, scaled by AmountScale.
 type Transaction struct {
 	ID            int64
 	EventID       uuid.UUID
@@ -29,8 +29,8 @@ type Transaction struct {
 	SchemaVersion int16
 	Instrument    string
 	Side          Side
-	Quantity      decimal.Decimal
-	Price         decimal.Decimal
+	Quantity      int64
+	Price         int64
 	Currency      string
 	OccurredAt    time.Time
 	ReceivedAt    time.Time
@@ -38,12 +38,14 @@ type Transaction struct {
 
 // ReconciledState is a tenant's running position and P&L for one
 // instrument, updated idempotently as transactions are reconciled.
+// Position, AverageCost, and RealizedPnL are fixed-point, scaled by
+// AmountScale.
 type ReconciledState struct {
 	TenantID          string
 	Instrument        string
-	Position          decimal.Decimal
-	AverageCost       decimal.Decimal
-	RealizedPnL       decimal.Decimal
+	Position          int64
+	AverageCost       int64
+	RealizedPnL       int64
 	LastTransactionID *int64
 	UpdatedAt         time.Time
 }

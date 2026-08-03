@@ -14,6 +14,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
 
 // ErrInvalidConfig indicates a Config failed validation.
@@ -194,8 +195,8 @@ func (pub *Publisher) Publish(ctx context.Context, event ingestion.Event) error 
 		SchemaVersion: event.SchemaVersion,
 		Instrument:    event.Instrument,
 		Side:          string(event.Side),
-		Quantity:      event.Quantity.String(),
-		Price:         event.Price.String(),
+		Quantity:      ledger.FormatAmount(event.Quantity),
+		Price:         ledger.FormatAmount(event.Price),
 		Currency:      event.Currency,
 		OccurredAt:    event.OccurredAt.Format(time.RFC3339Nano),
 	})

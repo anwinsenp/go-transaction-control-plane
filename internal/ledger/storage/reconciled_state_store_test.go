@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/shopspring/decimal"
-
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
 
@@ -24,9 +22,9 @@ func TestReconciledStateStore_UpsertInsertsAndUpdates(t *testing.T) {
 	initial := ledger.ReconciledState{
 		TenantID:          txn.TenantID,
 		Instrument:        txn.Instrument,
-		Position:          decimal.NewFromInt(10),
-		AverageCost:       decimal.NewFromFloat(189.50),
-		RealizedPnL:       decimal.Zero,
+		Position:          10 * ledger.AmountScale,
+		AverageCost:       18950000000, // 189.50
+		RealizedPnL:       0,
 		LastTransactionID: &txn.ID,
 	}
 	if err := store.Upsert(ctx, initial); err != nil {
@@ -37,13 +35,13 @@ func TestReconciledStateStore_UpsertInsertsAndUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after insert: %v", err)
 	}
-	if !got.Position.Equal(initial.Position) {
-		t.Fatalf("Get after insert: position = %s, want %s", got.Position, initial.Position)
+	if got.Position != initial.Position {
+		t.Fatalf("Get after insert: position = %d, want %d", got.Position, initial.Position)
 	}
 
 	updated := initial
-	updated.Position = decimal.NewFromInt(20)
-	updated.RealizedPnL = decimal.NewFromFloat(15.25)
+	updated.Position = 20 * ledger.AmountScale
+	updated.RealizedPnL = 1525000000 // 15.25
 	if err := store.Upsert(ctx, updated); err != nil {
 		t.Fatalf("Upsert (update): %v", err)
 	}
@@ -52,11 +50,11 @@ func TestReconciledStateStore_UpsertInsertsAndUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
-	if !got.Position.Equal(updated.Position) {
-		t.Fatalf("Get after update: position = %s, want %s", got.Position, updated.Position)
+	if got.Position != updated.Position {
+		t.Fatalf("Get after update: position = %d, want %d", got.Position, updated.Position)
 	}
-	if !got.RealizedPnL.Equal(updated.RealizedPnL) {
-		t.Fatalf("Get after update: realized P&L = %s, want %s", got.RealizedPnL, updated.RealizedPnL)
+	if got.RealizedPnL != updated.RealizedPnL {
+		t.Fatalf("Get after update: realized P&L = %d, want %d", got.RealizedPnL, updated.RealizedPnL)
 	}
 }
 
@@ -90,7 +88,7 @@ func TestReconciledStateStore_PrecisionAndSign(t *testing.T) {
 			realizedPnL: "-500.1234",
 		},
 		{
-			name:        "realized pnl at full 4-decimal precision",
+			name:        "realized pnl at full precision",
 			position:    "10",
 			averageCost: "189.50000000",
 			realizedPnL: "-1234.5678",
@@ -109,12 +107,25 @@ func TestReconciledStateStore_PrecisionAndSign(t *testing.T) {
 				t.Fatalf("Insert transaction: %v", err)
 			}
 
+			position, err := ledger.ParseAmount(tt.position)
+			if err != nil {
+				t.Fatalf("ParseAmount(position): %v", err)
+			}
+			averageCost, err := ledger.ParseAmount(tt.averageCost)
+			if err != nil {
+				t.Fatalf("ParseAmount(averageCost): %v", err)
+			}
+			realizedPnL, err := ledger.ParseAmount(tt.realizedPnL)
+			if err != nil {
+				t.Fatalf("ParseAmount(realizedPnL): %v", err)
+			}
+
 			state := ledger.ReconciledState{
 				TenantID:          txn.TenantID,
 				Instrument:        txn.Instrument,
-				Position:          decimal.RequireFromString(tt.position),
-				AverageCost:       decimal.RequireFromString(tt.averageCost),
-				RealizedPnL:       decimal.RequireFromString(tt.realizedPnL),
+				Position:          position,
+				AverageCost:       averageCost,
+				RealizedPnL:       realizedPnL,
 				LastTransactionID: &txn.ID,
 			}
 			if err := store.Upsert(ctx, state); err != nil {
@@ -125,14 +136,14 @@ func TestReconciledStateStore_PrecisionAndSign(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Get: %v", err)
 			}
-			if !got.Position.Equal(state.Position) {
-				t.Fatalf("Get: position = %s, want %s", got.Position, state.Position)
+			if got.Position != state.Position {
+				t.Fatalf("Get: position = %d, want %d", got.Position, state.Position)
 			}
-			if !got.AverageCost.Equal(state.AverageCost) {
-				t.Fatalf("Get: average cost = %s, want %s", got.AverageCost, state.AverageCost)
+			if got.AverageCost != state.AverageCost {
+				t.Fatalf("Get: average cost = %d, want %d", got.AverageCost, state.AverageCost)
 			}
-			if !got.RealizedPnL.Equal(state.RealizedPnL) {
-				t.Fatalf("Get: realized P&L = %s, want %s", got.RealizedPnL, state.RealizedPnL)
+			if got.RealizedPnL != state.RealizedPnL {
+				t.Fatalf("Get: realized P&L = %d, want %d", got.RealizedPnL, state.RealizedPnL)
 			}
 		})
 	}

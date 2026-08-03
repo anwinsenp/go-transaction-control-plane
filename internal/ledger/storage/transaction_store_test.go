@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
@@ -19,8 +18,8 @@ func sampleTransaction() ledger.Transaction {
 		SchemaVersion: 1,
 		Instrument:    "AAPL",
 		Side:          ledger.SideBuy,
-		Quantity:      decimal.NewFromInt(10),
-		Price:         decimal.NewFromFloat(189.50),
+		Quantity:      10 * ledger.AmountScale,
+		Price:         18950000000, // 189.50
 		Currency:      "USD",
 		OccurredAt:    time.Now().UTC().Truncate(time.Microsecond),
 	}
@@ -47,11 +46,11 @@ func TestTransactionStore_InsertAndGetByEventID(t *testing.T) {
 	if got.EventID != want.EventID || got.TenantID != want.TenantID || got.Instrument != want.Instrument {
 		t.Fatalf("GetByEventID: got %+v, want fields matching %+v", got, want)
 	}
-	if !got.Quantity.Equal(want.Quantity) {
-		t.Fatalf("GetByEventID: quantity = %s, want %s", got.Quantity, want.Quantity)
+	if got.Quantity != want.Quantity {
+		t.Fatalf("GetByEventID: quantity = %d, want %d", got.Quantity, want.Quantity)
 	}
-	if !got.Price.Equal(want.Price) {
-		t.Fatalf("GetByEventID: price = %s, want %s", got.Price, want.Price)
+	if got.Price != want.Price {
+		t.Fatalf("GetByEventID: price = %d, want %d", got.Price, want.Price)
 	}
 }
 
@@ -158,25 +157,25 @@ func TestTransactionStore_InsertConstraintViolations(t *testing.T) {
 		{
 			name: "zero quantity",
 			mutate: func(txn *ledger.Transaction) {
-				txn.Quantity = decimal.Zero
+				txn.Quantity = 0
 			},
 		},
 		{
 			name: "negative quantity",
 			mutate: func(txn *ledger.Transaction) {
-				txn.Quantity = decimal.NewFromInt(-5)
+				txn.Quantity = -5 * ledger.AmountScale
 			},
 		},
 		{
 			name: "zero price",
 			mutate: func(txn *ledger.Transaction) {
-				txn.Price = decimal.Zero
+				txn.Price = 0
 			},
 		},
 		{
 			name: "negative price",
 			mutate: func(txn *ledger.Transaction) {
-				txn.Price = decimal.NewFromFloat(-1.5)
+				txn.Price = -150000000 // -1.5
 			},
 		},
 	}
@@ -217,7 +216,7 @@ func TestTransactionStore_QuantityPricePrecision(t *testing.T) {
 		},
 		{
 			name:     "large value with full 8 decimal places",
-			quantity: "123456789012.12345678",
+			quantity: "50000000000.12345678",
 			price:    "98765.87654321",
 		},
 		{
@@ -233,30 +232,39 @@ func TestTransactionStore_QuantityPricePrecision(t *testing.T) {
 			store := NewTransactionStore(pool)
 			ctx := context.Background()
 
+			quantity, err := ledger.ParseAmount(tt.quantity)
+			if err != nil {
+				t.Fatalf("ParseAmount(quantity): %v", err)
+			}
+			price, err := ledger.ParseAmount(tt.price)
+			if err != nil {
+				t.Fatalf("ParseAmount(price): %v", err)
+			}
+
 			txn := sampleTransaction()
-			txn.Quantity = decimal.RequireFromString(tt.quantity)
-			txn.Price = decimal.RequireFromString(tt.price)
+			txn.Quantity = quantity
+			txn.Price = price
 
 			inserted, err := store.Insert(ctx, txn)
 			if err != nil {
 				t.Fatalf("Insert: %v", err)
 			}
-			if !inserted.Quantity.Equal(txn.Quantity) {
-				t.Fatalf("Insert: quantity = %s, want %s", inserted.Quantity, txn.Quantity)
+			if inserted.Quantity != txn.Quantity {
+				t.Fatalf("Insert: quantity = %d, want %d", inserted.Quantity, txn.Quantity)
 			}
-			if !inserted.Price.Equal(txn.Price) {
-				t.Fatalf("Insert: price = %s, want %s", inserted.Price, txn.Price)
+			if inserted.Price != txn.Price {
+				t.Fatalf("Insert: price = %d, want %d", inserted.Price, txn.Price)
 			}
 
 			got, err := store.GetByEventID(ctx, txn.EventID)
 			if err != nil {
 				t.Fatalf("GetByEventID: %v", err)
 			}
-			if !got.Quantity.Equal(txn.Quantity) {
-				t.Fatalf("GetByEventID: quantity = %s, want %s", got.Quantity, txn.Quantity)
+			if got.Quantity != txn.Quantity {
+				t.Fatalf("GetByEventID: quantity = %d, want %d", got.Quantity, txn.Quantity)
 			}
-			if !got.Price.Equal(txn.Price) {
-				t.Fatalf("GetByEventID: price = %s, want %s", got.Price, txn.Price)
+			if got.Price != txn.Price {
+				t.Fatalf("GetByEventID: price = %d, want %d", got.Price, txn.Price)
 			}
 		})
 	}

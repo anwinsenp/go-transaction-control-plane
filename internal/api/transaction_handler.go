@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
@@ -82,12 +81,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 		log.Printf("write json response: %v", err)
 	}
 }
-
-// maxDecimalMagnitude bounds quantity and price so a malformed or
-// malicious payload (e.g. "1e400") can't reach the ledger's decimal
-// arithmetic or Postgres numeric columns with a value large enough to
-// overflow them. 10^15 is far above any realistic trade quantity or price.
-var maxDecimalMagnitude = decimal.RequireFromString("1000000000000000")
 
 // TransactionEventRequest is the wire format for a mock transaction event
 // submitted to the ingestion service. Amount fields are strings so the
@@ -201,14 +194,14 @@ func (event TransactionEventRequest) validate() error {
 		return fmt.Errorf("side must be %q or %q", ledger.SideBuy, ledger.SideSell)
 	}
 
-	quantity, err := decimal.NewFromString(event.Quantity)
-	if err != nil || !quantity.IsPositive() || quantity.GreaterThan(maxDecimalMagnitude) {
-		return fmt.Errorf("quantity must be a positive decimal number no greater than %s", maxDecimalMagnitude)
+	quantity, err := ledger.ParseAmount(event.Quantity)
+	if err != nil || quantity <= 0 || quantity > ledger.MaxAmount {
+		return fmt.Errorf("quantity must be a positive decimal number no greater than %s", ledger.FormatAmount(ledger.MaxAmount))
 	}
 
-	price, err := decimal.NewFromString(event.Price)
-	if err != nil || !price.IsPositive() || price.GreaterThan(maxDecimalMagnitude) {
-		return fmt.Errorf("price must be a positive decimal number no greater than %s", maxDecimalMagnitude)
+	price, err := ledger.ParseAmount(event.Price)
+	if err != nil || price <= 0 || price > ledger.MaxAmount {
+		return fmt.Errorf("price must be a positive decimal number no greater than %s", ledger.FormatAmount(ledger.MaxAmount))
 	}
 
 	if !isValidCurrencyCode(event.Currency) {
@@ -234,12 +227,12 @@ func (event TransactionEventRequest) toIngestionEvent() (ingestion.Event, error)
 		return ingestion.Event{}, fmt.Errorf("event_id must be a valid UUID: %w", err)
 	}
 
-	quantity, err := decimal.NewFromString(event.Quantity)
+	quantity, err := ledger.ParseAmount(event.Quantity)
 	if err != nil {
 		return ingestion.Event{}, fmt.Errorf("quantity must be a valid decimal number: %w", err)
 	}
 
-	price, err := decimal.NewFromString(event.Price)
+	price, err := ledger.ParseAmount(event.Price)
 	if err != nil {
 		return ingestion.Event{}, fmt.Errorf("price must be a valid decimal number: %w", err)
 	}
