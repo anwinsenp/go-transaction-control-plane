@@ -11,7 +11,7 @@ import (
 )
 
 func TestServerRoutes(t *testing.T) {
-	server := NewServer("127.0.0.1:0")
+	server := NewServer("127.0.0.1:0", &fakePublisher{})
 	testServer := httptest.NewServer(server.httpServer.Handler)
 	defer testServer.Close()
 
@@ -80,8 +80,46 @@ func TestServerRoutes(t *testing.T) {
 	}
 }
 
+// TestServerRoutePublishFailureReturns503 exercises a publish failure
+// through the actual mux-registered route (rather than calling the handler
+// function directly, as transaction_handler_test.go does), so a mismatch
+// between server.go's route registration and the handler's error behavior
+// would be caught here too.
+func TestServerRoutePublishFailureReturns503(t *testing.T) {
+	publisher := &fakePublisher{err: errors.New("kafka broker unreachable")}
+	server := NewServer("127.0.0.1:0", publisher)
+	testServer := httptest.NewServer(server.httpServer.Handler)
+	defer testServer.Close()
+
+	validBody := mustMarshal(t, TransactionEventRequest{
+		EventID:    "11111111-1111-1111-1111-111111111111",
+		TenantID:   "tenant-a",
+		Instrument: "AAPL",
+		Side:       "BUY",
+		Quantity:   "10",
+		Price:      "150.25",
+		Currency:   "USD",
+		OccurredAt: "2026-08-03T12:00:00Z",
+	})
+
+	request, err := http.NewRequest(http.MethodPost, testServer.URL+"/v1/transactions", strings.NewReader(validBody))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	response, err := testServer.Client().Do(request)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
 func TestServerStartAndShutdown(t *testing.T) {
-	server := NewServer("127.0.0.1:0")
+	server := NewServer("127.0.0.1:0", &fakePublisher{})
 
 	startErrors := make(chan error, 1)
 	go func() {

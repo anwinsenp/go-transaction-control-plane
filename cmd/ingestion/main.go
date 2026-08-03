@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion/kafka"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -35,7 +36,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := api.NewServer(addr)
+	kafkaConfig, err := kafka.ConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve kafka config: %w", err)
+	}
+
+	publisher, err := kafka.NewPublisher(kafkaConfig)
+	if err != nil {
+		return fmt.Errorf("create kafka publisher: %w", err)
+	}
+	defer publisher.Close()
+
+	server := api.NewServer(addr, publisher)
 
 	serverErrors := make(chan error, 1)
 	go func() {

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
 
@@ -92,37 +93,50 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-// transactionHandler accepts a mock transaction event over REST. It is a
-// wiring skeleton: it validates that the request is well-formed JSON with
-// the required fields present and well-formed, then acknowledges receipt.
-// It does not yet publish to Kafka or write to the ledger — that logic
-// lands with the hot-path ingestion work.
-func transactionHandler(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxTransactionEventBytes)
+// newTransactionHandler returns an http.HandlerFunc that accepts a mock
+// transaction event over REST, validates it, publishes it to Kafka via
+// publisher, and acknowledges receipt only once the publish has durably
+// succeeded.
+func newTransactionHandler(publisher ingestion.Publisher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxTransactionEventBytes)
 
-	body := transactionBodyPool.Get().(*bytes.Buffer)
-	defer func() {
-		body.Reset()
-		transactionBodyPool.Put(body)
-	}()
+		body := transactionBodyPool.Get().(*bytes.Buffer)
+		defer func() {
+			body.Reset()
+			transactionBodyPool.Put(body)
+		}()
 
-	if _, err := body.ReadFrom(r.Body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
+		if _, err := body.ReadFrom(r.Body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		var event TransactionEventRequest
+		if err := json.NewDecoder(bytes.NewReader(body.Bytes())).Decode(&event); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		if err := event.validate(); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		ingestionEvent, err := event.toIngestionEvent()
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if err := publisher.Publish(r.Context(), ingestionEvent); err != nil {
+			log.Printf("%v", fmt.Errorf("publish transaction event %s: %w", event.EventID, err))
+			writeJSONError(w, http.StatusServiceUnavailable, "failed to publish transaction event")
+			return
+		}
+
+		writeJSON(w, http.StatusAccepted, event)
 	}
-
-	var event TransactionEventRequest
-	if err := json.NewDecoder(bytes.NewReader(body.Bytes())).Decode(&event); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if err := event.validate(); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusAccepted, event)
 }
 
 // validate reports the first invalid or missing field in event, or nil if
@@ -169,6 +183,46 @@ func (event TransactionEventRequest) validate() error {
 	}
 
 	return nil
+}
+
+// toIngestionEvent converts an already-validated event into the
+// transport-agnostic ingestion.Event published to Kafka. It must only be
+// called after validate() has returned nil: it re-parses the same fields
+// validate() already checked, so a parse failure here would indicate
+// validate() and toIngestionEvent have drifted out of sync with each
+// other, not a bad request.
+func (event TransactionEventRequest) toIngestionEvent() (ingestion.Event, error) {
+	eventID, err := uuid.Parse(event.EventID)
+	if err != nil {
+		return ingestion.Event{}, fmt.Errorf("event_id must be a valid UUID: %w", err)
+	}
+
+	quantity, err := decimal.NewFromString(event.Quantity)
+	if err != nil {
+		return ingestion.Event{}, fmt.Errorf("quantity must be a valid decimal number: %w", err)
+	}
+
+	price, err := decimal.NewFromString(event.Price)
+	if err != nil {
+		return ingestion.Event{}, fmt.Errorf("price must be a valid decimal number: %w", err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339, event.OccurredAt)
+	if err != nil {
+		return ingestion.Event{}, fmt.Errorf("occurred_at must be an RFC3339 timestamp: %w", err)
+	}
+
+	return ingestion.Event{
+		EventID:       eventID,
+		TenantID:      event.TenantID,
+		SchemaVersion: ingestion.CurrentSchemaVersion,
+		Instrument:    event.Instrument,
+		Side:          ledger.Side(event.Side),
+		Quantity:      quantity,
+		Price:         price,
+		Currency:      event.Currency,
+		OccurredAt:    occurredAt,
+	}, nil
 }
 
 // isValidCurrencyCode reports whether code has the shape of an ISO 4217

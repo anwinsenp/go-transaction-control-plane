@@ -7,6 +7,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 )
 
 // Server wraps the ingestion service's HTTP endpoints.
@@ -15,11 +17,12 @@ type Server struct {
 }
 
 // NewServer builds a Server listening on addr with the ingestion service's
-// routes registered.
-func NewServer(addr string) *Server {
+// routes registered. publisher is used to ship validated transaction events
+// to Kafka.
+func NewServer(addr string, publisher ingestion.Publisher) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
-	mux.HandleFunc("POST /v1/transactions", transactionHandler)
+	mux.HandleFunc("POST /v1/transactions", newTransactionHandler(publisher))
 
 	return &Server{
 		httpServer: &http.Server{

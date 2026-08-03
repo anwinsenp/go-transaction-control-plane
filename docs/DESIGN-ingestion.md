@@ -50,6 +50,48 @@ described in `CLAUDE.md`. The strategy:
   payload validation, so unauthenticated or rate-limited traffic is
   rejected as cheaply as possible, without spending validation work on it.
 
+## Kafka publish and producer configuration
+
+Once a request passes validation, the handler converts it into a
+transport-agnostic `ingestion.Event` and hands it to the `ingestion.Publisher`
+port (`internal/ingestion`). `internal/ingestion/kafka` is the concrete
+implementation, built on
+[`github.com/twmb/franz-go`](https://github.com/twmb/franz-go):
+
+- **Durability:** the producer is configured with `RequiredAcks(AllISRAcks())`
+  — it waits for every in-sync replica to acknowledge a write, not just the
+  partition leader. A transaction event is part of the ledger's source of
+  truth, so losing one to a leader crash before ISR replication is not an
+  acceptable trade for lower publish latency.
+- **Partitioning:** the Kafka message key is `<tenant_id>:<instrument>`, so
+  every event for a given tenant's instrument lands on the same partition
+  and is observed by the processor in publish order — idempotent P&L
+  reconciliation depends on seeing an instrument's events in order. The two
+  components are joined without escaping (`tenantID + ":" + instrument`),
+  which is safe only because `internal/api`'s validation charsets forbid
+  `:` in both fields (tenant_id: lowercase alphanumeric/hyphen; instrument:
+  uppercase alphanumeric/dot). If either charset is ever relaxed to allow
+  `:`, this key could collide across tenant/instrument boundaries.
+- **Batching/latency:** `ProducerLinger` batches concurrently in-flight
+  produces into fewer requests. The publish call itself is synchronous
+  (`ProduceSync`), which cancels any pending linger and drains immediately,
+  so linger only helps when multiple requests are publishing concurrently —
+  it never adds latency to a single in-flight request.
+- **Timeouts:** `ProduceRequestTimeout` bounds how long a single produce
+  request can block on the broker, so a stalled broker can't hang a request
+  goroutine indefinitely.
+- **Config source:** `kafka.Config` is resolved via `kafka.ConfigFromEnv()`
+  (`KAFKA_BROKERS`, `KAFKA_TOPIC`, `KAFKA_REQUEST_TIMEOUT`,
+  `KAFKA_LINGER`), defaulting to `kafka.LocalConfig()` sized for the
+  docker-compose local stack: `localhost:9092` (single broker),
+  `transaction-events` topic, a 10s `RequestTimeout`, and a 5ms `Linger`.
+- **Error handling:** a publish failure is wrapped (`fmt.Errorf(...: %w...)`),
+  logged, and surfaced to the caller as `503 Service Unavailable` — the
+  request is never acknowledged with `202` unless the event durably reached
+  Kafka. There is no circuit breaker or backpressure shedding around this
+  call yet; that's tracked separately (see Backpressure and Circuit breaker
+  sections below).
+
 ## Schema/API versioning
 
 The transaction event schema (the Kafka payload contract) and the public
