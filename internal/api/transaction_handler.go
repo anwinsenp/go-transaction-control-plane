@@ -30,6 +30,22 @@ var transactionBodyPool = sync.Pool{
 	},
 }
 
+// transactionReaderPool reuses the *bytes.Reader wrapped around the body
+// buffer so decoding a request doesn't allocate a fresh reader per call.
+var transactionReaderPool = sync.Pool{
+	New: func() any {
+		return bytes.NewReader(nil)
+	},
+}
+
+// transactionEventPool reuses TransactionEventRequest values across
+// requests so decoding doesn't allocate the struct itself on the hot path.
+var transactionEventPool = sync.Pool{
+	New: func() any {
+		return new(TransactionEventRequest)
+	},
+}
+
 // jsonResponseCodec pairs a reusable buffer with the json.Encoder bound to
 // it, so the encoder (and its boxing of the underlying writer) isn't
 // rebuilt on every response.
@@ -88,6 +104,12 @@ type TransactionEventRequest struct {
 	OccurredAt string `json:"occurred_at"`
 }
 
+// Reset clears event back to its zero value so it can be safely reused
+// from transactionEventPool for the next request.
+func (event *TransactionEventRequest) Reset() {
+	*event = TransactionEventRequest{}
+}
+
 // errorResponse is the wire format for a client-facing 4xx error.
 type errorResponse struct {
 	Error string `json:"error"`
@@ -112,9 +134,24 @@ func newTransactionHandler(publisher ingestion.Publisher) http.HandlerFunc {
 			return
 		}
 
-		var event TransactionEventRequest
-		if err := json.NewDecoder(bytes.NewReader(body.Bytes())).Decode(&event); err != nil {
+		reader := transactionReaderPool.Get().(*bytes.Reader)
+		reader.Reset(body.Bytes())
+		defer transactionReaderPool.Put(reader)
+
+		event := transactionEventPool.Get().(*TransactionEventRequest)
+		defer func() {
+			event.Reset()
+			transactionEventPool.Put(event)
+		}()
+
+		decoder := json.NewDecoder(reader)
+		if err := decoder.Decode(event); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		if trailing := body.Bytes()[decoder.InputOffset():]; !isJSONWhitespace(trailing) {
+			writeJSONError(w, http.StatusBadRequest, "invalid request body: trailing data")
 			return
 		}
 
@@ -273,6 +310,20 @@ func isLowerAlphanumeric(char rune) bool {
 
 func isUpperAlphanumeric(char rune) bool {
 	return (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')
+}
+
+// isJSONWhitespace reports whether data contains only JSON whitespace
+// characters (RFC 8259 §2), i.e. it is safe to ignore as padding after a
+// decoded value rather than rejecting it as trailing garbage.
+func isJSONWhitespace(data []byte) bool {
+	for _, char := range data {
+		switch char {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // writeJSONError writes a JSON error body with the given HTTP status.

@@ -281,6 +281,48 @@ func TestTransactionHandler(t *testing.T) {
 				event.Price = "1e2"
 			}),
 		},
+		{
+			name: "quantity exactly at max magnitude is accepted",
+			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
+				event.Quantity = "1000000000000000"
+			})),
+			wantStatus: http.StatusAccepted,
+			wantEvent: withField(func(event *TransactionEventRequest) {
+				event.Quantity = "1000000000000000"
+			}),
+		},
+		{
+			name: "quantity one unit above max magnitude is rejected",
+			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
+				event.Quantity = "1000000000000001"
+			})),
+			wantStatus:        http.StatusBadRequest,
+			wantErrorContains: "quantity must be a positive decimal number",
+		},
+		{
+			name: "price exactly at max magnitude is accepted",
+			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
+				event.Price = "1000000000000000"
+			})),
+			wantStatus: http.StatusAccepted,
+			wantEvent: withField(func(event *TransactionEventRequest) {
+				event.Price = "1000000000000000"
+			}),
+		},
+		{
+			name: "price one unit above max magnitude is rejected",
+			body: mustMarshal(t, withField(func(event *TransactionEventRequest) {
+				event.Price = "1000000000000001"
+			})),
+			wantStatus:        http.StatusBadRequest,
+			wantErrorContains: "price must be a positive decimal number",
+		},
+		{
+			name:              "whitespace then trailing garbage after JSON value is rejected",
+			body:              mustMarshal(t, validEvent) + "  x",
+			wantStatus:        http.StatusBadRequest,
+			wantErrorContains: "invalid request body: trailing data",
+		},
 	}
 
 	for _, testCase := range tests {
@@ -394,13 +436,30 @@ func TestTransactionHandlerSurfacesPublishError(t *testing.T) {
 	}
 }
 
-// TestTransactionHandlerIgnoresTrailingDataAfterJSONValue locks in
-// json.Decoder's trailing-data tolerance: decoding via a Decoder consumes
-// only the first JSON value and ignores anything after it, unlike
-// json.Unmarshal which would reject trailing non-whitespace bytes. This
-// behavior must be preserved by the pooled-buffer decode path.
-func TestTransactionHandlerIgnoresTrailingDataAfterJSONValue(t *testing.T) {
+// TestTransactionHandlerRejectsTrailingDataAfterJSONValue locks in the
+// handler's stricter-than-default json.Decoder behavior: unlike a bare
+// Decoder, which consumes only the first JSON value and silently ignores
+// anything after it, the handler must reject non-whitespace bytes left
+// over past the decoded value.
+func TestTransactionHandlerRejectsTrailingDataAfterJSONValue(t *testing.T) {
 	body := mustMarshal(t, validTransactionEvent()) + `{"trailing":"garbage"}`
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/transactions", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	newTransactionHandler(&fakePublisher{})(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+// TestTransactionHandlerAcceptsTrailingWhitespaceAfterJSONValue verifies
+// that trailing JSON whitespace (a common artifact of pretty-printed or
+// newline-terminated request bodies) is still tolerated, since it isn't
+// "garbage" in any meaningful sense.
+func TestTransactionHandlerAcceptsTrailingWhitespaceAfterJSONValue(t *testing.T) {
+	body := mustMarshal(t, validTransactionEvent()) + "\n  \t\n"
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/transactions", strings.NewReader(body))
 	recorder := httptest.NewRecorder()
@@ -693,6 +752,93 @@ func TestTransactionHandlerPublishesUsingRequestContext(t *testing.T) {
 	}
 	if value := publisher.capturedCtx.Value(requestContextKey{}); value != "marker" {
 		t.Errorf("Publish() context value = %v, want %q (handler must forward r.Context(), not context.Background())", value, "marker")
+	}
+}
+
+// TestTransactionEventRequestReset verifies Reset() clears every field back
+// to its zero value directly, independent of the handler. The handler's
+// pool-reuse tests can't surface a partial Reset() bug because validate()
+// requires every field to be non-empty, so JSON decoding always overwrites
+// every field anyway; this test exercises Reset() on its own so a future
+// field added to TransactionEventRequest without updating Reset() is caught
+// here rather than silently leaking stale data through the pool.
+func TestTransactionEventRequestReset(t *testing.T) {
+	event := TransactionEventRequest{
+		EventID:    "11111111-1111-1111-1111-111111111111",
+		TenantID:   "tenant-a",
+		Instrument: "AAPL",
+		Side:       "BUY",
+		Quantity:   "10",
+		Price:      "150.25",
+		Currency:   "USD",
+		OccurredAt: "2026-08-03T12:00:00Z",
+	}
+
+	event.Reset()
+
+	if event != (TransactionEventRequest{}) {
+		t.Errorf("event after Reset() = %+v, want zero value", event)
+	}
+}
+
+// TestIsJSONWhitespace directly exercises isJSONWhitespace's classification
+// of trailing bytes, independent of the handler, covering the RFC 8259 §2
+// whitespace set plus the mixed whitespace/non-whitespace shapes that would
+// otherwise only be reachable indirectly through a full handler request.
+func TestIsJSONWhitespace(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{
+			name: "nil data is whitespace",
+			data: nil,
+			want: true,
+		},
+		{
+			name: "empty data is whitespace",
+			data: []byte(""),
+			want: true,
+		},
+		{
+			name: "space is whitespace",
+			data: []byte("   "),
+			want: true,
+		},
+		{
+			name: "tab, carriage return, and newline are whitespace",
+			data: []byte("\t\r\n\t\r\n"),
+			want: true,
+		},
+		{
+			name: "single non-whitespace byte is not whitespace",
+			data: []byte("x"),
+			want: false,
+		},
+		{
+			name: "leading whitespace followed by garbage is not whitespace",
+			data: []byte("  x"),
+			want: false,
+		},
+		{
+			name: "garbage followed by trailing whitespace is not whitespace",
+			data: []byte("x  "),
+			want: false,
+		},
+		{
+			name: "whitespace surrounding a single garbage byte is not whitespace",
+			data: []byte(" \t x \n "),
+			want: false,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isJSONWhitespace(testCase.data); got != testCase.want {
+				t.Errorf("isJSONWhitespace(%q) = %v, want %v", testCase.data, got, testCase.want)
+			}
+		})
 	}
 }
 
