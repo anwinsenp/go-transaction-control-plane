@@ -9,6 +9,7 @@ import (
 
 func TestRunGracefulShutdown(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("GRPC_ADDR", "127.0.0.1:0")
 
 	runErrors := make(chan error, 1)
 	go func() {
@@ -35,12 +36,26 @@ func TestRunGracefulShutdown(t *testing.T) {
 
 func TestRunServerStartError(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "not-a-valid-addr")
+	t.Setenv("GRPC_ADDR", "127.0.0.1:0")
 
 	err := run()
 	if err == nil {
 		t.Fatal("run() error = nil, want non-nil")
 	}
-	if !strings.Contains(err.Error(), "ingestion server:") {
-		t.Errorf("run() error = %v, want it to wrap %q", err, "ingestion server:")
+	if !strings.Contains(err.Error(), "ingestion HTTP server:") {
+		t.Errorf("run() error = %v, want it to wrap %q", err, "ingestion HTTP server:")
+	}
+}
+
+func TestRunGRPCServerStartError(t *testing.T) {
+	t.Setenv("HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("GRPC_ADDR", "not-a-valid-addr")
+
+	err := run()
+	if err == nil {
+		t.Fatal("run() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "ingestion gRPC server:") {
+		t.Errorf("run() error = %v, want it to wrap %q", err, "ingestion gRPC server:")
 	}
 }

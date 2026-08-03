@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion/kafka"
@@ -33,6 +36,11 @@ func run() error {
 		addr = ":8080"
 	}
 
+	grpcAddr := os.Getenv("GRPC_ADDR")
+	if grpcAddr == "" {
+		grpcAddr = ":9090"
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -48,29 +56,95 @@ func run() error {
 	defer publisher.Close()
 
 	server := api.NewServer(addr, publisher)
+	grpcServer := api.NewGRPCServer(grpcAddr, publisher)
+
+	// runCtx is canceled either by the shutdown signal (via its parent ctx)
+	// or by the first server that fails to start, so a start failure on one
+	// server always triggers a shutdown of the other rather than leaking its
+	// goroutine and listener.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	var startErrOnce sync.Once
+	var startErr error
+	recordStartErr := func(err error) {
+		startErrOnce.Do(func() {
+			startErr = err
+			cancelRun()
+		})
+	}
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("ingestion service listening on %s", addr)
+		log.Printf("ingestion HTTP service listening on %s", addr)
 		if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- fmt.Errorf("ingestion server: %w", err)
+			wrapped := fmt.Errorf("ingestion HTTP server: %w", err)
+			recordStartErr(wrapped)
+			serverErrors <- wrapped
 			return
 		}
 		serverErrors <- nil
 	}()
 
-	select {
-	case err := <-serverErrors:
-		return err
-	case <-ctx.Done():
+	grpcServerErrors := make(chan error, 1)
+	go func() {
+		log.Printf("ingestion gRPC service listening on %s", grpcAddr)
+		if err := grpcServer.Start(); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			wrapped := fmt.Errorf("ingestion gRPC server: %w", err)
+			recordStartErr(wrapped)
+			grpcServerErrors <- wrapped
+			return
+		}
+		grpcServerErrors <- nil
+	}()
+
+	<-runCtx.Done()
+	if startErr == nil {
 		log.Print("shutdown signal received, draining connections")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown ingestion server: %w", err)
+	// Shut down both servers concurrently against the shared deadline so a
+	// slow HTTP drain can't eat into the gRPC server's share of
+	// shutdownTimeout (and vice versa).
+	var shutdownWG sync.WaitGroup
+	var shutdownMu sync.Mutex
+	var shutdownErr error
+	recordShutdownErr := func(err error) {
+		shutdownMu.Lock()
+		defer shutdownMu.Unlock()
+		shutdownErr = errors.Join(shutdownErr, err)
 	}
-	return <-serverErrors
+
+	shutdownWG.Add(2)
+	go func() {
+		defer shutdownWG.Done()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			recordShutdownErr(fmt.Errorf("shutdown ingestion HTTP server: %w", err))
+		}
+	}()
+	go func() {
+		defer shutdownWG.Done()
+		if err := grpcServer.Shutdown(shutdownCtx); err != nil {
+			recordShutdownErr(fmt.Errorf("shutdown ingestion gRPC server: %w", err))
+		}
+	}()
+	shutdownWG.Wait()
+
+	httpErr := <-serverErrors
+	grpcErr := <-grpcServerErrors
+
+	switch {
+	case startErr != nil:
+		return startErr
+	case shutdownErr != nil:
+		return shutdownErr
+	case httpErr != nil:
+		return httpErr
+	case grpcErr != nil:
+		return grpcErr
+	}
+	return nil
 }
