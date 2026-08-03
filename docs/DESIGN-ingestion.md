@@ -97,24 +97,33 @@ isolation, but they're consistent across the before/after runs below.
 
 "Before" is commit `b189903` (publish path landed, request/response buffer
 pooling already in place, decoder/reader/event-struct pooling not yet
-added). "After" is the current `sync.Pool`-backed decoder path (commit
-`9f69405`). Run with `go test ./internal/api/... -bench=BenchmarkTransactionHandler
--benchmem -run='^$' -benchtime=2s` on Apple M5 Pro / darwin/arm64, go1.26.5:
+added). "After" is the current `sync.Pool`-backed decoder path on top of
+the fixed-point `int64` amount representation (commit `eae5934`, which
+replaced `shopspring/decimal`'s `*big.Int`-backed `ParseAmount` with
+allocation-free fixed-point parsing — see
+[DESIGN-ledger.md](DESIGN-ledger.md)). Run with `go test ./internal/api/...
+-bench=BenchmarkTransactionHandler -benchmem -run='^$' -benchtime=2s` on
+Apple M5 Pro / darwin/arm64, go1.26.5:
 
 | Payload            | Before: ns/op | Before: B/op | Before: allocs/op | After: ns/op | After: B/op | After: allocs/op |
 |--------------------|--------------:|-------------:|-------------------:|-------------:|------------:|-------------------:|
-| typical             | 2637 | 8806 | 53 | 2697 | 8527 | 50 |
-| min-length fields   | 2670 | 8745 | 51 | 2655 | 8432 | 48 |
-| max-length fields   | 2942 | 8980 | 53 | 3024 | 8653 | 50 |
+| typical             | 2637 | 8806 | 53 | 2489 | 8062 | 35 |
+| min-length fields   | 2670 | 8745 | 51 | 2481 | 8120 | 33 |
+| max-length fields   | 2942 | 8980 | 53 | 2818 | 8226 | 35 |
 
-Decoder-buffer pooling (`9f69405`) cuts 3 allocations and ~275-330 bytes
-per request across all payload sizes; latency (`ns/op`) is flat within
-run-to-run noise, since the pooling change targets allocation count/bytes,
-not the JSON decode work itself. allocs/op scaling with the size of
-`tenant_id`/`instrument` (51 at min length vs. 53 at max, both before and
-after) is expected: `isValidTenantID`/`isValidInstrument` iterate the
-field's runes but don't allocate, so the delta comes from `json.Decoder`
-and `strconv`/`decimal` parsing paths, not from validation itself.
+Decoder-buffer pooling (`9f69405`) plus the fixed-point `ParseAmount`
+refactor (`eae5934`) together cut 18 allocations per request relative to
+"Before"; the fixed-point change alone accounts for most of that drop
+(50/48/50 allocs/op at `9f69405` down to 35/33/35 now), since
+`decimal.Decimal` parsing allocated a `*big.Int` per `quantity`/`price`
+field on every request, and `ParseAmount` on `int64` does not. Latency
+(`ns/op`) tracks the allocation-count drop loosely but is noisier
+run-to-run than `allocs/op`, which is exact. allocs/op scaling with the
+size of `tenant_id`/`instrument` (33 at min length vs. 35 at max, both
+before and after the fixed-point change) is expected:
+`isValidTenantID`/`isValidInstrument` iterate the field's runes but don't
+allocate, so the delta comes from `json.Decoder` parsing, not from
+validation itself.
 
 `BenchmarkTransactionIngestionServer_IngestTransaction` in
 `internal/api/grpc_transaction_handler_test.go` covers the gRPC handler's
@@ -122,21 +131,23 @@ own validate -> convert -> publish path, calling `IngestTransaction`
 directly rather than over a network connection, so it isolates the
 handler's allocation behavior from gRPC transport/codec overhead (unlike
 `BenchmarkTransactionHandler`, which includes `httptest` scaffolding). Run
-under the same conditions as above:
+under the same conditions as above, at `eae5934`:
 
 | Payload            | ns/op | B/op | allocs/op |
 |--------------------|------:|-----:|----------:|
-| typical             | 167.3 | 830 | 1 |
-| min-length fields   | 104.8 | 710 | 1 |
-| max-length fields   | 118.0 | 861 | 1 |
+| typical             | 143.0 | 807 | 1 |
+| min-length fields   | 97.6  | 711 | 1 |
+| max-length fields   | 125.3 | 861 | 1 |
 
-The gRPC path allocates far less than the REST path (1 `allocs/op` vs. ~50)
+The gRPC path allocates far less than the REST path (1 `allocs/op` vs. ~35)
 for two reasons that are structural, not incidental: gRPC's request is
 already a decoded, typed Go struct handed in by `grpc-go` before
 `IngestTransaction` runs, so there's no JSON decode step to benchmark; and
 `quantity`/`price` arrive as already-scaled `int64` wire values (see
 [DESIGN-ledger.md](DESIGN-ledger.md)), so there's no `ParseAmount` string
-parsing on this path either. The one remaining allocation is the returned
+parsing on this path either — REST's remaining ~35 allocs/op are now
+dominated by `json.Decoder`/`encoding/json` reflection overhead rather
+than amount parsing. The one gRPC-path allocation is the returned
 `*ingestionv1.IngestTransactionResponse` itself, which escapes to the heap
 because it's returned as a pointer across the gRPC handler boundary.
 
