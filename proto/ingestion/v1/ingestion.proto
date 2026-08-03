@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package ingestion.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/anwinsenp/go-transaction-control-plane/internal/api/pb/ingestion/v1;ingestionv1";
+
+// Side identifies the direction of a trade.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+// TransactionEvent is a transaction event submitted for ingestion.
+message TransactionEvent {
+  string event_id = 1;
+  string tenant_id = 2;
+  string instrument = 3;
+  Side side = 4;
+  // quantity is a fixed-point decimal scaled by 1e8 (i.e. the real value is
+  // quantity / 1e8).
+  int64 quantity = 5;
+  // price is a fixed-point decimal scaled by 1e8 (i.e. the real value is
+  // price / 1e8).
+  int64 price = 6;
+  string currency = 7;
+  google.protobuf.Timestamp occurred_at = 8;
+}
+
+// IngestTransactionRequest wraps a single TransactionEvent for ingestion.
+message IngestTransactionRequest {
+  TransactionEvent event = 1;
+}
+
+// IngestTransactionResponse acknowledges receipt of a TransactionEvent.
+message IngestTransactionResponse {
+  string event_id = 1;
+  bool accepted = 2;
+}
+
+// TransactionIngestionService accepts transaction events on the ingestion
+// hot path.
+service TransactionIngestionService {
+  rpc IngestTransaction(IngestTransactionRequest) returns (IngestTransactionResponse);
+}
