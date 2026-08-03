@@ -6,7 +6,7 @@ Kubernetes operator for tenant scaling, and Prometheus/Grafana telemetry,
 deployed to a public sandbox for demonstration.
 
 ## Ingestion service (`/cmd/ingestion`, `/internal/api`)
-- Public gRPC/REST endpoint that accepts mock high-frequency trade/transaction
+- Public gRPC/REST endpoint that accepts mock high-throughput trade/transaction
   events.
 - Zero-allocation hot path: use `sync.Pool` for reused buffers/objects,
   preallocate slices with known capacity, avoid unnecessary interface boxing.

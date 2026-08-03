@@ -16,7 +16,7 @@ than just read as source.
 
 ## Goals
 
-- A zero-allocation ingestion hot path for accepting mock high-frequency
+- A zero-allocation ingestion hot path for accepting mock high-throughput
   transaction events.
 - Kafka-based event streaming decoupling ingestion from processing.
 - Postgres-backed reconciliation of transaction state with ACID guarantees.

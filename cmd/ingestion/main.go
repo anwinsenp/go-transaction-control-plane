@@ -1,4 +1,4 @@
-// Command ingestion is the public entrypoint for mock high-frequency
+// Command ingestion is the public entrypoint for mock high-throughput
 // transaction events. This entrypoint is wiring only: it loads config,
 // constructs the API server, and manages its lifecycle. Business logic
 // lives in /internal/api and the domain packages it calls.
