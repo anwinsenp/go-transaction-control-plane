@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -80,6 +81,30 @@ func (auth *apiKeyAuthenticator) authenticate(ctx context.Context) bool {
 		return false
 	}
 
+	return auth.validate(token)
+}
+
+// middleware wraps next with a bearer-token check equivalent to
+// unaryInterceptor's, for the REST transport: it requires the same
+// "Authorization: Bearer <key>" header and rejects with 401 instead of
+// codes.Unauthenticated.
+func (auth *apiKeyAuthenticator) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		token, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
+		if !ok || !auth.validate(token) {
+			writeJSONError(responseWriter, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
+		}
+
+		next.ServeHTTP(responseWriter, request)
+	})
+}
+
+// validate reports whether token matches one of auth's configured keys. It
+// runs a fixed-time comparison against every key rather than returning as
+// soon as one matches, so total comparison time doesn't depend on which key
+// matched or whether any did.
+func (auth *apiKeyAuthenticator) validate(token string) bool {
 	var match int
 	for _, key := range auth.validKeys {
 		match |= subtle.ConstantTimeCompare([]byte(token), []byte(key))

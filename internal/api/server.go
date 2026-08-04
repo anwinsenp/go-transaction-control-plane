@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -18,11 +19,19 @@ type Server struct {
 
 // NewServer builds a Server listening on addr with the ingestion service's
 // routes registered. publisher is used to ship validated transaction events
-// to Kafka.
-func NewServer(addr string, publisher ingestion.Publisher) *Server {
+// to Kafka. apiKeys is the set of bearer tokens required on the
+// transactions route; /healthz stays unauthenticated so orchestrator
+// liveness/readiness probes don't need a key. At least one key is required,
+// and empty-string keys are rejected.
+func NewServer(addr string, publisher ingestion.Publisher, apiKeys []string) (*Server, error) {
+	authenticator, err := newAPIKeyAuthenticator(apiKeys)
+	if err != nil {
+		return nil, fmt.Errorf("configure API key authenticator: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
-	mux.HandleFunc("POST /v1/transactions", newTransactionHandler(publisher))
+	mux.Handle("POST /v1/transactions", authenticator.middleware(newTransactionHandler(publisher)))
 
 	return &Server{
 		httpServer: &http.Server{
@@ -33,7 +42,7 @@ func NewServer(addr string, publisher ingestion.Publisher) *Server {
 			WriteTimeout:      10 * time.Second,
 			IdleTimeout:       60 * time.Second,
 		},
-	}
+	}, nil
 }
 
 // Start begins serving requests and blocks until the server stops. It

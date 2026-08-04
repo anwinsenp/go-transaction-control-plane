@@ -61,7 +61,10 @@ func run() error {
 	}
 	defer publisher.Close()
 
-	server := api.NewServer(addr, publisher)
+	server, err := api.NewServer(addr, publisher, apiKeys)
+	if err != nil {
+		return fmt.Errorf("create ingestion HTTP server: %w", err)
+	}
 	grpcServer, err := api.NewGRPCServer(grpcAddr, publisher, apiKeys)
 	if err != nil {
 		return fmt.Errorf("create ingestion gRPC server: %w", err)

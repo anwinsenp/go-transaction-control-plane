@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -174,5 +177,137 @@ func TestAPIKeyAuthenticatorUnaryInterceptorExemptsHealthCheck(t *testing.T) {
 	}
 	if !handled {
 		t.Error("handler called = false, want true (health check should bypass auth)")
+	}
+}
+
+// recordingHandler is an http.Handler that records whether it ran, so tests
+// can assert middleware stops unauthenticated requests before they reach
+// the wrapped handler.
+func recordingHandler(called *bool) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		*called = true
+		responseWriter.WriteHeader(http.StatusOK)
+	})
+}
+
+func TestAPIKeyAuthenticatorMiddleware(t *testing.T) {
+	authenticator, err := newAPIKeyAuthenticator([]string{"valid-key"})
+	if err != nil {
+		t.Fatalf("newAPIKeyAuthenticator() error = %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		header      string
+		wantHandled bool
+	}{
+		{
+			name:        "valid bearer token",
+			header:      "Bearer valid-key",
+			wantHandled: true,
+		},
+		{
+			name:        "missing authorization header",
+			header:      "",
+			wantHandled: false,
+		},
+		{
+			name:        "not a bearer token",
+			header:      "valid-key",
+			wantHandled: false,
+		},
+		{
+			name:        "wrong key",
+			header:      "Bearer wrong-key",
+			wantHandled: false,
+		},
+		{
+			name:        "lowercase bearer scheme is rejected",
+			header:      "bearer valid-key",
+			wantHandled: false,
+		},
+		{
+			name:        "extra space after bearer scheme is rejected",
+			header:      "Bearer  valid-key",
+			wantHandled: false,
+		},
+		{
+			name:        "trailing whitespace on token is rejected",
+			header:      "Bearer valid-key ",
+			wantHandled: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var handled bool
+			handler := authenticator.middleware(recordingHandler(&handled))
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/transactions", nil)
+			if test.header != "" {
+				request.Header.Set("Authorization", test.header)
+			}
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if handled != test.wantHandled {
+				t.Errorf("handler called = %v, want %v", handled, test.wantHandled)
+			}
+
+			if test.wantHandled {
+				if recorder.Code != http.StatusOK {
+					t.Errorf("status = %d, want %d", recorder.Code, http.StatusOK)
+				}
+				return
+			}
+
+			if recorder.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
+
+			var response errorResponse
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response.Error == "" {
+				t.Error("error message is empty, want a clear description")
+			}
+		})
+	}
+}
+
+func TestAPIKeyAuthenticatorMiddlewareAcceptsAnyConfiguredKey(t *testing.T) {
+	authenticator, err := newAPIKeyAuthenticator([]string{"key-one", "key-two"})
+	if err != nil {
+		t.Fatalf("newAPIKeyAuthenticator() error = %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "first configured key", token: "key-one"},
+		{name: "second configured key", token: "key-two"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var handled bool
+			handler := authenticator.middleware(recordingHandler(&handled))
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/transactions", nil)
+			request.Header.Set("Authorization", "Bearer "+test.token)
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if !handled {
+				t.Errorf("handler called = false, want true for token %q", test.token)
+			}
+			if recorder.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d", recorder.Code, http.StatusOK)
+			}
+		})
 	}
 }
