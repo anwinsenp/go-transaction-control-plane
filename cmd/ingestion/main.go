@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -41,6 +42,11 @@ func run() error {
 		grpcAddr = ":9090"
 	}
 
+	apiKeys, err := apiKeysFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve API key config: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -56,7 +62,10 @@ func run() error {
 	defer publisher.Close()
 
 	server := api.NewServer(addr, publisher)
-	grpcServer := api.NewGRPCServer(grpcAddr, publisher)
+	grpcServer, err := api.NewGRPCServer(grpcAddr, publisher, apiKeys)
+	if err != nil {
+		return fmt.Errorf("create ingestion gRPC server: %w", err)
+	}
 
 	// runCtx is canceled either by the shutdown signal (via its parent ctx)
 	// or by the first server that fails to start, so a start failure on one
@@ -147,4 +156,30 @@ func run() error {
 		return grpcErr
 	}
 	return nil
+}
+
+// apiKeysFromEnv reads INGESTION_API_KEYS as a comma-separated list of
+// bearer tokens accepted by the gRPC ingestion endpoint. It returns an
+// error if the variable is unset or empty, since the service must fail to
+// start rather than accept unauthenticated traffic.
+func apiKeysFromEnv() ([]string, error) {
+	raw := os.Getenv("INGESTION_API_KEYS")
+	if raw == "" {
+		return nil, fmt.Errorf("INGESTION_API_KEYS must be set to a comma-separated list of accepted API keys")
+	}
+
+	var keys []string
+	for _, key := range strings.Split(raw, ",") {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("INGESTION_API_KEYS must contain at least one non-empty key")
+	}
+
+	return keys, nil
 }

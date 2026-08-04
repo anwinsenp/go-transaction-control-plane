@@ -5,17 +5,42 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthgrpc "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	ingestionv1 "github.com/anwinsenp/go-transaction-control-plane/internal/api/pb/ingestion/v1"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 )
+
+// testAPIKey is the bearer token every test GRPCServer accepts.
+const testAPIKey = "test-api-key"
+
+// newTestGRPCServer builds a GRPCServer configured with testAPIKey, failing
+// the test if construction fails.
+func newTestGRPCServer(t *testing.T, addr string, publisher ingestion.Publisher) *GRPCServer {
+	t.Helper()
+	server, err := NewGRPCServer(addr, publisher, []string{testAPIKey})
+	if err != nil {
+		t.Fatalf("NewGRPCServer() error = %v", err)
+	}
+	return server
+}
+
+// authContext returns ctx carrying testAPIKey as a bearer token, for
+// dialing RPCs that require authentication.
+func authContext(ctx context.Context) context.Context {
+	return metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+testAPIKey))
+}
 
 // freeTCPAddr returns a loopback address with an OS-assigned free port,
 // suitable for binding a server that a test client will dial by address
@@ -30,8 +55,33 @@ func freeTCPAddr(t *testing.T) string {
 	return listener.Addr().String()
 }
 
+func TestNewGRPCServerRejectsInvalidAPIKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiKeys []string
+	}{
+		{name: "no keys", apiKeys: nil},
+		{name: "empty key", apiKeys: []string{"valid-key", ""}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, err := NewGRPCServer(freeTCPAddr(t), &fakePublisher{}, test.apiKeys)
+			if err == nil {
+				t.Fatalf("NewGRPCServer(%v) error = nil, want error", test.apiKeys)
+			}
+			if server != nil {
+				t.Errorf("NewGRPCServer(%v) server = %v, want nil", test.apiKeys, server)
+			}
+			if !strings.Contains(err.Error(), "configure API key authenticator") {
+				t.Errorf("NewGRPCServer(%v) error = %v, want it to wrap %q", test.apiKeys, err, "configure API key authenticator")
+			}
+		})
+	}
+}
+
 func TestGRPCServerStartAndShutdown(t *testing.T) {
-	server := NewGRPCServer(freeTCPAddr(t), &fakePublisher{})
+	server := newTestGRPCServer(t, freeTCPAddr(t), &fakePublisher{})
 
 	startErrors := make(chan error, 1)
 	go func() {
@@ -57,7 +107,7 @@ func TestGRPCServerStartAndShutdown(t *testing.T) {
 
 func TestGRPCServerServesTransactionIngestionAndHealth(t *testing.T) {
 	addr := freeTCPAddr(t)
-	server := NewGRPCServer(addr, &fakePublisher{})
+	server := newTestGRPCServer(t, addr, &fakePublisher{})
 
 	go server.Start()
 	defer func() {
@@ -69,6 +119,8 @@ func TestGRPCServerServesTransactionIngestionAndHealth(t *testing.T) {
 	conn := dialWithRetry(t, addr)
 	defer conn.Close()
 
+	// The health check must stay reachable without credentials so
+	// orchestrator liveness/readiness probes don't need an API key.
 	healthClient := healthgrpc.NewHealthClient(conn)
 	healthResponse, err := healthClient.Check(context.Background(), &healthgrpc.HealthCheckRequest{Service: transactionIngestionServiceName})
 	if err != nil {
@@ -79,12 +131,49 @@ func TestGRPCServerServesTransactionIngestionAndHealth(t *testing.T) {
 	}
 
 	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
-	ingestResponse, err := ingestionClient.IngestTransaction(context.Background(), &ingestionv1.IngestTransactionRequest{Event: validTransactionEventProto()})
+	ingestResponse, err := ingestionClient.IngestTransaction(authContext(context.Background()), &ingestionv1.IngestTransactionRequest{Event: validTransactionEventProto()})
 	if err != nil {
 		t.Fatalf("IngestTransaction() error = %v", err)
 	}
 	if !ingestResponse.GetAccepted() {
 		t.Errorf("Accepted = false, want true")
+	}
+}
+
+func TestGRPCServerRejectsIngestTransactionWithoutValidAPIKey(t *testing.T) {
+	addr := freeTCPAddr(t)
+	server := newTestGRPCServer(t, addr, &fakePublisher{})
+
+	go server.Start()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(shutdownCtx)
+	}()
+
+	conn := dialWithRetry(t, addr)
+	defer conn.Close()
+
+	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "no credentials", ctx: context.Background()},
+		{name: "wrong key", ctx: metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer wrong-key"))},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ingestionClient.IngestTransaction(test.ctx, &ingestionv1.IngestTransactionRequest{Event: validTransactionEventProto()})
+			if err == nil {
+				t.Fatal("IngestTransaction() error = nil, want Unauthenticated")
+			}
+			if code := status.Code(err); code != codes.Unauthenticated {
+				t.Errorf("IngestTransaction() error code = %v, want %v", code, codes.Unauthenticated)
+			}
+		})
 	}
 }
 
@@ -97,7 +186,7 @@ func TestGRPCServerServesTransactionIngestionAndHealth(t *testing.T) {
 func TestGRPCServerConcurrentIngestTransaction(t *testing.T) {
 	addr := freeTCPAddr(t)
 	publisher := &fakePublisher{}
-	server := NewGRPCServer(addr, publisher)
+	server := newTestGRPCServer(t, addr, publisher)
 
 	go server.Start()
 	defer func() {
@@ -126,7 +215,7 @@ func TestGRPCServerConcurrentIngestTransaction(t *testing.T) {
 				event := validTransactionEventProto()
 				event.EventId = uuid.New().String()
 
-				response, err := ingestionClient.IngestTransaction(context.Background(), &ingestionv1.IngestTransactionRequest{Event: event})
+				response, err := ingestionClient.IngestTransaction(authContext(context.Background()), &ingestionv1.IngestTransactionRequest{Event: event})
 				if err != nil {
 					failures <- fmt.Sprintf("goroutine %d request %d: IngestTransaction() error = %v", goroutineIndex, requestIndex, err)
 					continue

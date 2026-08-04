@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"google.golang.org/grpc"
@@ -28,8 +29,16 @@ type GRPCServer struct {
 
 // NewGRPCServer builds a GRPCServer that will listen on addr once Start is
 // called. publisher is used to ship validated transaction events to Kafka.
-func NewGRPCServer(addr string, publisher ingestion.Publisher) *GRPCServer {
-	server := grpc.NewServer()
+// apiKeys is the set of bearer tokens accepted on every RPC other than the
+// gRPC health check; at least one key is required, and empty-string keys are
+// rejected.
+func NewGRPCServer(addr string, publisher ingestion.Publisher, apiKeys []string) (*GRPCServer, error) {
+	authenticator, err := newAPIKeyAuthenticator(apiKeys)
+	if err != nil {
+		return nil, fmt.Errorf("configure API key authenticator: %w", err)
+	}
+
+	server := grpc.NewServer(grpc.UnaryInterceptor(authenticator.unaryInterceptor()))
 
 	ingestionv1.RegisterTransactionIngestionServiceServer(server, newTransactionIngestionServer(publisher))
 
@@ -38,7 +47,7 @@ func NewGRPCServer(addr string, publisher ingestion.Publisher) *GRPCServer {
 	healthServer.SetServingStatus(transactionIngestionServiceName, healthgrpc.HealthCheckResponse_SERVING)
 	healthgrpc.RegisterHealthServer(server, healthServer)
 
-	return &GRPCServer{addr: addr, server: server, health: healthServer}
+	return &GRPCServer{addr: addr, server: server, health: healthServer}, nil
 }
 
 // Start binds addr and begins serving gRPC requests, blocking until the
