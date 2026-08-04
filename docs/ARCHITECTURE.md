@@ -43,10 +43,10 @@ flowchart LR
     ingest -->|publish event| kafka[(Kafka)]
     kafka --> processor[Go transaction processor]
     processor -->|reconciled state| postgres[(Postgres / Aurora)]
-    kafka -->|consumer lag| operator[Custom K8s Operator\nTradingTenant]
     ingest -->|metrics| prom[Prometheus]
-    processor -->|metrics| prom
+    processor -->|metrics: consumer lag, P99| prom
     operator -->|metrics| prom
+    prom -->|PromQL query: lag + P99| operator[Custom K8s Operator\nTradingTenant]
     prom --> grafana[Grafana dashboards + alerts]
 ```
 
@@ -69,14 +69,17 @@ flowchart LR
 4. Reconciled state is written to Postgres/Aurora through a
    circuit-breaker-guarded storage layer, with connection pooling sized
    deliberately for the write/read concurrency this service expects.
-5. In parallel, the custom `TradingTenant` operator watches Kafka consumer
-   lag, processor P99 latency, and partition count per tenant, and
-   reconciles each `TradingTenant` resource: scaling replicas whenever
-   there's still Kafka-side headroom to do so, falling back to isolating a
-   tenant onto a dedicated node pool only once it's out of that headroom,
-   or flagging a downstream bottleneck as `Degraded`, depending on which
-   signals are elevated. See [DESIGN-operator.md](DESIGN-operator.md) for
-   the full decision table.
+5. The processor exports Kafka consumer lag and P99 latency per tenant as
+   Prometheus gauges alongside its other metrics — it does not go through a
+   separate lag exporter. In parallel, the custom `TradingTenant` operator
+   queries Prometheus for these same two signals (plus partition count) on
+   each reconcile pass and reconciles each `TradingTenant` resource:
+   scaling replicas whenever there's still Kafka-side headroom to do so,
+   falling back to isolating a tenant onto a dedicated node pool only once
+   it's out of that headroom, or flagging a downstream bottleneck as
+   `Degraded`, depending on which signals are elevated. See
+   [DESIGN-operator.md](DESIGN-operator.md) for the full decision table and
+   the Prometheus query path.
 6. All three services (ingestion, processor, operator) export Prometheus
    metrics on `/metrics`; Grafana dashboards and Alertmanager rules built on
    top of those metrics are checked into the repo as code.

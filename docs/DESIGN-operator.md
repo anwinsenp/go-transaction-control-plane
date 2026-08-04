@@ -43,6 +43,40 @@ writes to `spec`: spec is user (or, for `isolation.dedicatedNodePool`,
 operator-owned-but-still-spec) intent; the reconciler's job is to observe
 and act, not to mutate the desired state it's reconciling against.
 
+## Lag and latency observation path
+
+`observedKafkaLag` and `observedP99Ms` are populated by querying
+**Prometheus**, not by the reconciler calling the Kafka broker API directly.
+
+- The processor already exports Kafka consumer lag (per tenant) and P99
+  processing latency as Prometheus gauges/histograms on its own `/metrics`
+  endpoint — it computes lag itself from its consumer group's current
+  offset vs. the partition high-water mark, so no separate lag exporter
+  (e.g. `kafka_exporter`, `kminion`) is needed for this signal.
+- Prometheus scrapes that endpoint on its normal interval. `observedKafkaLag`
+  and `observedP99Ms` are therefore only as fresh as the last scrape, not
+  live at the moment of reconcile — a deliberate trade-off (see below).
+- On each reconcile pass, the operator runs an instant PromQL query against
+  Prometheus's HTTP API (via `prometheus/client_golang`'s `api`/`api/v1`
+  client) scoped to the tenant, under the same bounded `context.Context`
+  every other external call in `Reconcile` uses. The result populates
+  `observedKafkaLag`, `observedP99Ms`, and `observedPartitionCount` in the
+  status subresource for that pass.
+- No separate component updates the CR's status. The reconciler that reads
+  Prometheus is the same reconciler that classifies lag/latency, decides the
+  action, and writes `status` — this keeps "observe" and "act" in one
+  auditable pass rather than splitting them across a watcher and an actor.
+
+This mirrors how KEDA's Prometheus scaler works (poll PromQL from inside the
+controller each evaluation cycle) rather than routing through the
+Kubernetes custom-metrics API (`prometheus-adapter` + the metrics API
+aggregation layer): that path decouples the operator from Prometheus's
+query API, but adds a whole extra component for a benefit this
+single-purpose operator doesn't need. The trade-off accepted here is a
+hard runtime dependency on Prometheus's scrape freshness for a value that
+gates autoscaling decisions — if the scrape interval lags real Kafka lag by
+tens of seconds, the operator acts on stale data for that long.
+
 ## Reconcile decision table
 
 For each `TradingTenant`, the reconciler classifies `observedKafkaLag`
