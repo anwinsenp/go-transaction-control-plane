@@ -31,14 +31,20 @@ type GRPCServer struct {
 // called. publisher is used to ship validated transaction events to Kafka.
 // apiKeys is the set of bearer tokens accepted on every RPC other than the
 // gRPC health check; at least one key is required, and empty-string keys are
-// rejected.
-func NewGRPCServer(addr string, publisher ingestion.Publisher, apiKeys []string) (*GRPCServer, error) {
+// rejected. rateLimit configures the per-API-key request rate accepted
+// before rejecting with codes.ResourceExhausted.
+func NewGRPCServer(addr string, publisher ingestion.Publisher, apiKeys []string, rateLimit RateLimitConfig) (*GRPCServer, error) {
 	authenticator, err := newAPIKeyAuthenticator(apiKeys)
 	if err != nil {
 		return nil, fmt.Errorf("configure API key authenticator: %w", err)
 	}
 
-	server := grpc.NewServer(grpc.UnaryInterceptor(authenticator.unaryInterceptor()))
+	limiter, err := newRateLimiter(rateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("configure rate limiter: %w", err)
+	}
+
+	server := grpc.NewServer(grpc.ChainUnaryInterceptor(authenticator.unaryInterceptor(), limiter.unaryInterceptor()))
 
 	ingestionv1.RegisterTransactionIngestionServiceServer(server, newTransactionIngestionServer(publisher))
 

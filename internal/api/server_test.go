@@ -16,11 +16,16 @@ import (
 // testHTTPAPIKey is the bearer token every test Server accepts.
 const testHTTPAPIKey = "test-api-key"
 
+// testRateLimitConfig is permissive enough that no test hits it
+// incidentally; rate limiting behavior itself is exercised with its own
+// tighter configuration.
+var testRateLimitConfig = RateLimitConfig{RequestsPerSecond: 1000, Burst: 1000}
+
 // newTestServer builds a Server configured with testHTTPAPIKey, failing the
 // test if construction fails.
 func newTestServer(t *testing.T, addr string, publisher ingestion.Publisher) *Server {
 	t.Helper()
-	server, err := NewServer(addr, publisher, []string{testHTTPAPIKey})
+	server, err := NewServer(addr, publisher, []string{testHTTPAPIKey}, testRateLimitConfig)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -44,7 +49,7 @@ func TestNewServerRejectsInvalidAPIKeys(t *testing.T) {
 
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			server, err := NewServer("127.0.0.1:0", &fakePublisher{}, testCase.apiKeys)
+			server, err := NewServer("127.0.0.1:0", &fakePublisher{}, testCase.apiKeys, testRateLimitConfig)
 			if err == nil {
 				t.Fatalf("NewServer(%v) error = nil, want error", testCase.apiKeys)
 			}
@@ -245,6 +250,62 @@ func TestServerHealthzDoesNotRequireAuth(t *testing.T) {
 
 	if response.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestServerRejectsTransactionsOverRateLimit(t *testing.T) {
+	server, err := NewServer("127.0.0.1:0", &fakePublisher{}, []string{testHTTPAPIKey}, RateLimitConfig{RequestsPerSecond: 1, Burst: 1})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	testServer := httptest.NewServer(server.httpServer.Handler)
+	defer testServer.Close()
+
+	validBody := mustMarshal(t, TransactionEventRequest{
+		EventID:    "11111111-1111-1111-1111-111111111111",
+		TenantID:   "tenant-a",
+		Instrument: "AAPL",
+		Side:       "BUY",
+		Quantity:   "10",
+		Price:      "150.25",
+		Currency:   "USD",
+		OccurredAt: "2026-08-03T12:00:00Z",
+	})
+
+	newRequest := func(t *testing.T) *http.Request {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodPost, testServer.URL+"/v1/transactions", strings.NewReader(validBody))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		setAuthHeader(request)
+		return request
+	}
+
+	firstResponse, err := testServer.Client().Do(newRequest(t))
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer firstResponse.Body.Close()
+	if firstResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("first request status = %d, want %d", firstResponse.StatusCode, http.StatusAccepted)
+	}
+
+	secondResponse, err := testServer.Client().Do(newRequest(t))
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer secondResponse.Body.Close()
+	if secondResponse.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("second request status = %d, want %d", secondResponse.StatusCode, http.StatusTooManyRequests)
+	}
+
+	var errResponse errorResponse
+	if err := json.NewDecoder(secondResponse.Body).Decode(&errResponse); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResponse.Error == "" {
+		t.Error("error message is empty, want a clear description")
 	}
 }
 

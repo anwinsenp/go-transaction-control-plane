@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,6 +48,11 @@ func run() error {
 		return fmt.Errorf("resolve API key config: %w", err)
 	}
 
+	rateLimit, err := rateLimitConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve rate limit config: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -61,11 +67,11 @@ func run() error {
 	}
 	defer publisher.Close()
 
-	server, err := api.NewServer(addr, publisher, apiKeys)
+	server, err := api.NewServer(addr, publisher, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion HTTP server: %w", err)
 	}
-	grpcServer, err := api.NewGRPCServer(grpcAddr, publisher, apiKeys)
+	grpcServer, err := api.NewGRPCServer(grpcAddr, publisher, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion gRPC server: %w", err)
 	}
@@ -185,4 +191,43 @@ func apiKeysFromEnv() ([]string, error) {
 	}
 
 	return keys, nil
+}
+
+// defaultRateLimitRequestsPerSecond and defaultRateLimitBurst are the
+// per-API-key rate limits applied when INGESTION_RATE_LIMIT_RPS /
+// INGESTION_RATE_LIMIT_BURST are unset. Unlike API keys, a missing rate
+// limit config shouldn't fail startup — these defaults give every
+// deployment baseline protection against being overwhelmed.
+const (
+	defaultRateLimitRequestsPerSecond = 50
+	defaultRateLimitBurst             = 100
+)
+
+// rateLimitConfigFromEnv reads the per-API-key rate limit from
+// INGESTION_RATE_LIMIT_RPS (requests per second, float) and
+// INGESTION_RATE_LIMIT_BURST (integer), falling back to
+// defaultRateLimitRequestsPerSecond and defaultRateLimitBurst when unset.
+func rateLimitConfigFromEnv() (api.RateLimitConfig, error) {
+	config := api.RateLimitConfig{
+		RequestsPerSecond: defaultRateLimitRequestsPerSecond,
+		Burst:             defaultRateLimitBurst,
+	}
+
+	if raw := os.Getenv("INGESTION_RATE_LIMIT_RPS"); raw != "" {
+		requestsPerSecond, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return api.RateLimitConfig{}, fmt.Errorf("parse INGESTION_RATE_LIMIT_RPS: %w", err)
+		}
+		config.RequestsPerSecond = requestsPerSecond
+	}
+
+	if raw := os.Getenv("INGESTION_RATE_LIMIT_BURST"); raw != "" {
+		burst, err := strconv.Atoi(raw)
+		if err != nil {
+			return api.RateLimitConfig{}, fmt.Errorf("parse INGESTION_RATE_LIMIT_BURST: %w", err)
+		}
+		config.Burst = burst
+	}
+
+	return config, nil
 }

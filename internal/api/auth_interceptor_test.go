@@ -13,6 +13,77 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestBearerToken(t *testing.T) {
+	tests := []struct {
+		name      string
+		header    string
+		wantToken string
+		wantOK    bool
+	}{
+		{name: "valid bearer token", header: "Bearer valid-key", wantToken: "valid-key", wantOK: true},
+		{name: "empty header", header: "", wantOK: false},
+		{name: "missing bearer scheme", header: "valid-key", wantOK: false},
+		{name: "lowercase bearer scheme is rejected", header: "bearer valid-key", wantOK: false},
+		{name: "extra space after scheme is kept as part of the token", header: "Bearer  valid-key", wantToken: " valid-key", wantOK: true},
+		{name: "empty token after scheme", header: "Bearer ", wantToken: "", wantOK: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			token, ok := bearerToken(test.header)
+			if ok != test.wantOK {
+				t.Fatalf("bearerToken(%q) ok = %v, want %v", test.header, ok, test.wantOK)
+			}
+			if ok && token != test.wantToken {
+				t.Errorf("bearerToken(%q) token = %q, want %q", test.header, token, test.wantToken)
+			}
+		})
+	}
+}
+
+func TestBearerTokenFromContext(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		wantToken string
+		wantOK    bool
+	}{
+		{
+			name:      "valid bearer token in metadata",
+			ctx:       metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer valid-key")),
+			wantToken: "valid-key",
+			wantOK:    true,
+		},
+		{
+			name:   "no incoming metadata",
+			ctx:    context.Background(),
+			wantOK: false,
+		},
+		{
+			name:   "metadata present but no authorization key",
+			ctx:    metadata.NewIncomingContext(context.Background(), metadata.Pairs("x-other", "value")),
+			wantOK: false,
+		},
+		{
+			name:   "authorization value missing bearer scheme",
+			ctx:    metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "valid-key")),
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			token, ok := bearerTokenFromContext(test.ctx)
+			if ok != test.wantOK {
+				t.Fatalf("bearerTokenFromContext() ok = %v, want %v", ok, test.wantOK)
+			}
+			if ok && token != test.wantToken {
+				t.Errorf("bearerTokenFromContext() token = %q, want %q", token, test.wantToken)
+			}
+		})
+	}
+}
+
 func TestNewAPIKeyAuthenticatorRejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name string

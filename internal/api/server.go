@@ -22,16 +22,22 @@ type Server struct {
 // to Kafka. apiKeys is the set of bearer tokens required on the
 // transactions route; /healthz stays unauthenticated so orchestrator
 // liveness/readiness probes don't need a key. At least one key is required,
-// and empty-string keys are rejected.
-func NewServer(addr string, publisher ingestion.Publisher, apiKeys []string) (*Server, error) {
+// and empty-string keys are rejected. rateLimit configures the per-API-key
+// request rate the transactions route accepts before rejecting with 429.
+func NewServer(addr string, publisher ingestion.Publisher, apiKeys []string, rateLimit RateLimitConfig) (*Server, error) {
 	authenticator, err := newAPIKeyAuthenticator(apiKeys)
 	if err != nil {
 		return nil, fmt.Errorf("configure API key authenticator: %w", err)
 	}
 
+	limiter, err := newRateLimiter(rateLimit)
+	if err != nil {
+		return nil, fmt.Errorf("configure rate limiter: %w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
-	mux.Handle("POST /v1/transactions", authenticator.middleware(newTransactionHandler(publisher)))
+	mux.Handle("POST /v1/transactions", authenticator.middleware(limiter.middleware(newTransactionHandler(publisher))))
 
 	return &Server{
 		httpServer: &http.Server{

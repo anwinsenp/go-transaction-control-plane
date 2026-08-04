@@ -29,7 +29,7 @@ const testAPIKey = "test-api-key"
 // the test if construction fails.
 func newTestGRPCServer(t *testing.T, addr string, publisher ingestion.Publisher) *GRPCServer {
 	t.Helper()
-	server, err := NewGRPCServer(addr, publisher, []string{testAPIKey})
+	server, err := NewGRPCServer(addr, publisher, []string{testAPIKey}, testRateLimitConfig)
 	if err != nil {
 		t.Fatalf("NewGRPCServer() error = %v", err)
 	}
@@ -66,7 +66,7 @@ func TestNewGRPCServerRejectsInvalidAPIKeys(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server, err := NewGRPCServer(freeTCPAddr(t), &fakePublisher{}, test.apiKeys)
+			server, err := NewGRPCServer(freeTCPAddr(t), &fakePublisher{}, test.apiKeys, testRateLimitConfig)
 			if err == nil {
 				t.Fatalf("NewGRPCServer(%v) error = nil, want error", test.apiKeys)
 			}
@@ -240,6 +240,38 @@ func TestGRPCServerConcurrentIngestTransaction(t *testing.T) {
 
 	if want := goroutineCount * requestsPerGoroutine; len(publisher.published) != want {
 		t.Errorf("published %d events, want %d", len(publisher.published), want)
+	}
+}
+
+func TestGRPCServerRejectsIngestTransactionOverRateLimit(t *testing.T) {
+	addr := freeTCPAddr(t)
+	server, err := NewGRPCServer(addr, &fakePublisher{}, []string{testAPIKey}, RateLimitConfig{RequestsPerSecond: 1, Burst: 1})
+	if err != nil {
+		t.Fatalf("NewGRPCServer() error = %v", err)
+	}
+
+	go server.Start()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(shutdownCtx)
+	}()
+
+	conn := dialWithRetry(t, addr)
+	defer conn.Close()
+
+	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
+
+	if _, err := ingestionClient.IngestTransaction(authContext(context.Background()), &ingestionv1.IngestTransactionRequest{Event: validTransactionEventProto()}); err != nil {
+		t.Fatalf("first IngestTransaction() error = %v", err)
+	}
+
+	_, err = ingestionClient.IngestTransaction(authContext(context.Background()), &ingestionv1.IngestTransactionRequest{Event: validTransactionEventProto()})
+	if err == nil {
+		t.Fatal("second IngestTransaction() error = nil, want ResourceExhausted")
+	}
+	if code := status.Code(err); code != codes.ResourceExhausted {
+		t.Errorf("second IngestTransaction() error code = %v, want %v", code, codes.ResourceExhausted)
 	}
 }
 

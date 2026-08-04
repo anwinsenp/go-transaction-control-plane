@@ -18,6 +18,35 @@ import (
 // Kubernetes liveness/readiness probes don't need an API key.
 const healthCheckServicePrefix = "/grpc.health.v1.Health/"
 
+// bearerToken extracts the token from a "Bearer <token>" Authorization
+// header value. It's shared by the REST authenticator and rate limiter so
+// both derive the same request key from the header without duplicating the
+// parse, and doesn't allocate: CutPrefix returns a re-slice of header, not
+// a copy.
+func bearerToken(header string) (string, bool) {
+	return strings.CutPrefix(header, "Bearer ")
+}
+
+// bearerTokenFromContext extracts the token from ctx's incoming gRPC
+// "authorization" metadata. It's shared by the gRPC authenticator and rate
+// limiter interceptors so both derive the same request key independently,
+// straight from the metadata gRPC-Go already attaches to ctx.
+func bearerTokenFromContext(ctx context.Context) (string, bool) {
+	metaData, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", false
+	}
+
+	values := metaData.Get("authorization")
+	if len(values) == 0 {
+		return "", false
+	}
+
+	// gRPC-Go delivers a single-value metadata header as one entry, so only
+	// the first value needs checking.
+	return bearerToken(values[0])
+}
+
 // apiKeyAuthenticator validates incoming gRPC requests against a fixed set
 // of accepted API keys, presented as a bearer token.
 type apiKeyAuthenticator struct {
@@ -64,23 +93,10 @@ func (auth *apiKeyAuthenticator) unaryInterceptor() grpc.UnaryServerInterceptor 
 // authenticate reports whether ctx carries a valid bearer token in its
 // "authorization" metadata.
 func (auth *apiKeyAuthenticator) authenticate(ctx context.Context) bool {
-	metaData, ok := metadata.FromIncomingContext(ctx)
+	token, ok := bearerTokenFromContext(ctx)
 	if !ok {
 		return false
 	}
-
-	values := metaData.Get("authorization")
-	if len(values) == 0 {
-		return false
-	}
-
-	// gRPC-Go delivers a single-value metadata header as one entry, so only
-	// the first value needs checking.
-	token, ok := strings.CutPrefix(values[0], "Bearer ")
-	if !ok {
-		return false
-	}
-
 	return auth.validate(token)
 }
 
@@ -90,7 +106,7 @@ func (auth *apiKeyAuthenticator) authenticate(ctx context.Context) bool {
 // codes.Unauthenticated.
 func (auth *apiKeyAuthenticator) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
-		token, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer ")
+		token, ok := bearerToken(request.Header.Get("Authorization"))
 		if !ok || !auth.validate(token) {
 			writeJSONError(responseWriter, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
