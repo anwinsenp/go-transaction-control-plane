@@ -157,9 +157,12 @@ deployed to a public sandbox for demonstration.
   against it.
 
 ## Infrastructure (`/terraform`)
-- Modular Terraform: one concern per module (networking, ECS/EKS cluster,
+- Modular Terraform: one concern per module (networking, k3s cluster on EC2,
   Kafka, Postgres/Aurora, ingress).
-- Deploy the ingestion layer to AWS (ECS or EKS) with a public endpoint.
+- Self-host Kubernetes via k3s on plain EC2 instances (control plane + agent
+  nodes) rather than managed EKS/ECS, for cost efficiency. Kind is used for
+  local development of the operator against a real API server.
+- Deploy the ingestion layer to the k3s cluster with a public endpoint.
 - Deploy Prometheus + Grafana (or point Grafana at a managed Prometheus) with
   a public, read-only dashboard link.
 - **Use existing operators for undifferentiated infrastructure — do not
@@ -180,7 +183,8 @@ deployed to a public sandbox for demonstration.
 
 ## Documentation
 - README: architecture diagram, the "why" behind key trade-offs (e.g.
-  ECS/Kinesis vs. Lambda for cold-start avoidance), public sandbox URL,
+  self-hosted k3s vs. managed EKS, and long-running k3s deployment vs.
+  Lambda for cold-start avoidance), public sandbox URL,
   Grafana dashboard link, how to run the load-test script.
 - `docs/RUNBOOK-operator-alerts.md`: diagnosis and action steps for each
   `TradingTenant` alert (isolation, degraded, at-max-replicas), linked from

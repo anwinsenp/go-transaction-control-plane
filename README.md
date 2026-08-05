@@ -11,7 +11,8 @@ public sandbox for demonstration.
 built incrementally against the tracked issues in this repo.
 
 **Stack:** Go · Kafka (Strimzi) · PostgreSQL/Aurora · Kubernetes
-(`controller-runtime`) · Prometheus/Grafana · Terraform · AWS (ECS/EKS)
+(`controller-runtime`) · Prometheus/Grafana · Terraform · AWS (self-hosted
+k3s on EC2, Kind for local dev)
 
 ## Documentation
 

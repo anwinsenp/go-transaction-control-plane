@@ -87,7 +87,7 @@ them.
                               Treat this as its own Go module/boundary —
                               don't let ingestion/processor code depend on
                               anything here or vice versa.
-/terraform/                — infrastructure definitions (ECS/EKS, VPC,
+/terraform/                — infrastructure definitions (EC2 + k3s, VPC,
                               etc). Modular, one concern per module. Not Go
                               — apply Terraform conventions, not the Go
                               rules above, when touching these files.

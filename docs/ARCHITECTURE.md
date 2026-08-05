@@ -96,10 +96,16 @@ flowchart LR
   (cert-manager), and the metrics stack (kube-prometheus-stack) all use
   mature existing operators instead of being reimplemented. See
   [ADR 0002](decisions/0002-single-custom-operator.md).
-- **ECS/EKS with a public endpoint over Lambda.** A long-running service
-  avoids Lambda's cold-start tail latency on a hot ingestion path where P99
-  matters; the trade-off is paying for always-on compute instead of
-  pay-per-invocation.
+- **Self-hosted k3s on EC2 over managed EKS/ECS.** Running k3s (a lightweight
+  Kubernetes distro) across plain EC2 instances instead of a managed control
+  plane trades operational overhead (patching, upgrades, HA of the control
+  plane are now our responsibility) for meaningfully lower cost — no EKS
+  control-plane fee or Fargate/managed-node-group premium. Kind provides the
+  same Kubernetes surface locally for operator development.
+- **A long-running service over Lambda.** Deploying ingestion as a
+  long-running service on the cluster avoids Lambda's cold-start tail
+  latency on a hot ingestion path where P99 matters; the trade-off is paying
+  for always-on compute instead of pay-per-invocation.
 
 ## Related docs
 
