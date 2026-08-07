@@ -212,15 +212,37 @@ implementation, built on
 ## Schema/API versioning
 
 The transaction event schema (the Kafka payload contract) and the public
-API contract are versioned independently:
+API contract are versioned independently, and each of the three surfaces
+below has its own versioning mechanism:
 
-- The public API exposes a version in its path/header (e.g. `/v1/...`),
-  so the wire contract with external callers can evolve without breaking
-  existing integrations.
-- The Kafka payload carries a schema version field, so the processor (a
-  separate deployable) can be rolled out independently from ingestion and
-  still correctly interpret events produced by an older or newer
-  ingestion version during a rolling deploy.
+- **Kafka payload.** The wire struct published to the `transaction-events`
+  topic (`wireEvent` in `internal/ingestion/kafka/publisher.go`) carries an
+  explicit `schema_version` field, stamped from
+  `ingestion.CurrentSchemaVersion` (`internal/ingestion/ingestion.go`). This
+  lets the processor — a separate deployable — be rolled out independently
+  from ingestion and still correctly interpret events produced by an older
+  or newer ingestion version during a rolling deploy. `CurrentSchemaVersion`
+  is bumped only for changes that aren't backward-compatible for a consumer
+  (field removed/retyped, semantics changed); purely additive fields don't
+  require a bump.
+- **gRPC/proto contract.** The public gRPC service is defined by a versioned
+  proto package, `ingestion.v1` (`proto/ingestion/v1/ingestion.proto`),
+  following standard gRPC API versioning practice: a breaking change to the
+  service or its messages is shipped as a new package (`ingestion.v2`)
+  alongside the existing one, rather than mutated in place. Compatibility is
+  enforced mechanically, not just by convention — CI runs `buf breaking`
+  (the `proto-breaking` Makefile target) against the proto tree on `main` on
+  every push and pull request, and fails the build if a change is
+  wire- or source-incompatible per `proto/buf.yaml`'s breaking rules.
+- **REST contract.** The hand-written REST API (`internal/api/server.go`,
+  `internal/api/transaction_handler.go`) is a separate, independently
+  maintained contract — it is not generated from the proto schema, and its
+  request/response DTOs (e.g. `TransactionEventRequest`) can diverge in
+  shape from `ingestionv1.TransactionEvent`. It is versioned via its URL
+  path (`/v1/transactions`); a breaking change to the REST request/response
+  shape ships as a new path prefix (`/v2/...`) rather than mutating `/v1/`
+  in place. Unlike the proto contract, there is no automated
+  compatibility check for REST today — changes are reviewed by hand.
 
 ## Backpressure
 
