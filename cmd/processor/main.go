@@ -61,7 +61,7 @@ func run() error {
 	}
 	defer consumer.Close()
 
-	log.Printf("processor consuming topic %q as group %q", kafkaConfig.Topic, kafkaConfig.GroupID)
+	log.Printf("processor consuming topic %q as group %q, routing failures to %q after %d retries", kafkaConfig.Topic, kafkaConfig.GroupID, kafkaConfig.DLQTopic, kafkaConfig.MaxRetries)
 	if err := consumer.Run(ctx); err != nil {
 		return fmt.Errorf("processor consumer: %w", err)
 	}

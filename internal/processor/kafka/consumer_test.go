@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -14,27 +15,37 @@ import (
 
 // fakeReconciler is a reconciler test double that records every
 // transaction it's asked to reconcile, so Consumer's decode-and-dispatch
-// behavior can be tested without a real Reconciler or Postgres.
+// behavior can be tested without a real Reconciler or Postgres. When
+// failTimes is zero (the default) and err is set, every call fails,
+// matching prior behavior; when failTimes is positive, only the first
+// failTimes calls fail and subsequent calls succeed, so reconcileWithRetry
+// can be tested with a reconciler that eventually recovers.
 type fakeReconciler struct {
 	reconciled []ledger.Transaction
 	err        error
+	failTimes  int
+	calls      int
 }
 
 func (fake *fakeReconciler) Reconcile(ctx context.Context, txn ledger.Transaction) error {
-	if fake.err != nil {
+	fake.calls++
+	if fake.err != nil && (fake.failTimes <= 0 || fake.calls <= fake.failTimes) {
 		return fake.err
 	}
 	fake.reconciled = append(fake.reconciled, txn)
 	return nil
 }
 
-// fakeConsumerClient is a consumerClient test double that returns
-// caller-configured fetches/errors on each PollFetches call, so Consumer's
-// behavior can be tested without a live Kafka broker.
+// fakeConsumerClient is a client test double that returns caller-configured
+// fetches/errors on each PollFetches call and records every record handed
+// to ProduceSync, so Consumer's behavior — including DLQ routing — can be
+// tested without a live Kafka broker.
 type fakeConsumerClient struct {
-	fetches []kgo.Fetches
-	call    int
-	closed  bool
+	fetches    []kgo.Fetches
+	call       int
+	closed     bool
+	produced   []*kgo.Record
+	produceErr error
 }
 
 func (fake *fakeConsumerClient) PollFetches(ctx context.Context) kgo.Fetches {
@@ -51,6 +62,23 @@ func (fake *fakeConsumerClient) PollFetches(ctx context.Context) kgo.Fetches {
 	}}
 }
 
+// ProduceSync mirrors *kgo.Client's real behavior of failing once ctx is
+// canceled (in addition to any caller-configured produceErr), so tests can
+// exercise Run's handling of a DLQ publish that fails because the consumer
+// is shutting down rather than because the broker rejected it.
+func (fake *fakeConsumerClient) ProduceSync(ctx context.Context, records ...*kgo.Record) kgo.ProduceResults {
+	fake.produced = append(fake.produced, records...)
+	err := fake.produceErr
+	if err == nil {
+		err = ctx.Err()
+	}
+	results := make(kgo.ProduceResults, len(records))
+	for i, record := range records {
+		results[i] = kgo.ProduceResult{Record: record, Err: err}
+	}
+	return results
+}
+
 func (fake *fakeConsumerClient) Close() {
 	fake.closed = true
 }
@@ -59,6 +87,35 @@ func fetchesWithRecords(topic string, count int) kgo.Fetches {
 	records := make([]*kgo.Record, count)
 	for i := range records {
 		records[i] = &kgo.Record{Topic: topic, Value: []byte("event")}
+	}
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: topic,
+			Partitions: []kgo.FetchPartition{{
+				Partition: 0,
+				Records:   records,
+			}},
+		}},
+	}}
+}
+
+// validTransactionPayload is a decodable wire payload, for tests that need
+// a record to reach reconciliation rather than fail at decode time.
+var validTransactionPayload = []byte(`{
+	"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+	"tenant_id": "tenant-1",
+	"instrument": "AAPL",
+	"side": "BUY",
+	"quantity": "10",
+	"price": "150.5",
+	"currency": "USD",
+	"occurred_at": "2026-01-02T15:04:05Z"
+}`)
+
+func fetchesWithValidRecords(topic string, count int) kgo.Fetches {
+	records := make([]*kgo.Record, count)
+	for i := range records {
+		records[i] = &kgo.Record{Topic: topic, Value: validTransactionPayload}
 	}
 	return kgo.Fetches{{
 		Topics: []kgo.FetchTopic{{
@@ -172,36 +229,326 @@ func mustAmount(t *testing.T, value string) int64 {
 	return amount
 }
 
-func TestConsumerRunReconcileErrorAbortsRun(t *testing.T) {
-	validPayload := []byte(`{
-		"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-		"tenant_id": "tenant-1",
-		"instrument": "AAPL",
-		"side": "BUY",
-		"quantity": "10",
-		"price": "150.5",
-		"currency": "USD",
-		"occurred_at": "2026-01-02T15:04:05Z"
-	}`)
-	fetches := kgo.Fetches{{
-		Topics: []kgo.FetchTopic{{
-			Topic: "transaction-events",
-			Partitions: []kgo.FetchPartition{{
-				Partition: 0,
-				Records:   []*kgo.Record{{Topic: "transaction-events", Value: validPayload}},
-			}},
-		}},
-	}}
+// TestConsumerRunRoutesExhaustedReconcileFailuresToDLQ drives Run through
+// two records that both fail reconciliation on every attempt. It asserts
+// Run doesn't abort on the first failure (no head-of-line blocking): both
+// records are retried up to maxRetries+1 times, published to the DLQ topic
+// with failure context, and the loop keeps going until a genuine broker
+// error ends it.
+func TestConsumerRunRoutesExhaustedReconcileFailuresToDLQ(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
 	reconcileErr := errors.New("reconcile: database unavailable")
-	fake := &fakeConsumerClient{fetches: []kgo.Fetches{fetches}}
-	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{err: reconcileErr}}
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{
+			fetchesWithValidRecords("transaction-events", 2),
+			fetchesWithError("transaction-events", 0, brokerErr),
+		},
+	}
+	consumer := &Consumer{
+		client:     fake,
+		topic:      "transaction-events",
+		dlqTopic:   "transaction-events-dlq",
+		maxRetries: 1,
+		rec:        &fakeReconciler{err: reconcileErr},
+	}
+
+	err := consumer.Run(context.Background())
+	if !errors.Is(err, brokerErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v (Run must not abort on reconcile failure)", err, brokerErr)
+	}
+
+	if len(fake.produced) != 2 {
+		t.Fatalf("produced %d DLQ records, want 2", len(fake.produced))
+	}
+	for _, record := range fake.produced {
+		if record.Topic != "transaction-events-dlq" {
+			t.Errorf("DLQ record topic = %q, want %q", record.Topic, "transaction-events-dlq")
+		}
+		var event dlqEvent
+		if err := json.Unmarshal(record.Value, &event); err != nil {
+			t.Fatalf("unmarshal dlq event: %v", err)
+		}
+		if event.Attempts != 2 {
+			t.Errorf("dlqEvent.Attempts = %d, want 2 (maxRetries=1 -> 2 total attempts)", event.Attempts)
+		}
+		if event.FailureReason != reconcileErr.Error() {
+			t.Errorf("dlqEvent.FailureReason = %q, want %q", event.FailureReason, reconcileErr.Error())
+		}
+		if event.OriginalTopic != "transaction-events" {
+			t.Errorf("dlqEvent.OriginalTopic = %q, want %q", event.OriginalTopic, "transaction-events")
+		}
+	}
+}
+
+// TestConsumerRunAbortsWhenDLQPublishFails confirms a DLQ publish failure
+// (as opposed to an exhausted reconcile) does abort Run, since silently
+// dropping a record that couldn't even reach the DLQ isn't acceptable.
+func TestConsumerRunAbortsWhenDLQPublishFails(t *testing.T) {
+	reconcileErr := errors.New("reconcile: database unavailable")
+	dlqPublishErr := errors.New("dlq topic unavailable")
+	fake := &fakeConsumerClient{
+		fetches:    []kgo.Fetches{fetchesWithValidRecords("transaction-events", 1)},
+		produceErr: dlqPublishErr,
+	}
+	consumer := &Consumer{
+		client:     fake,
+		topic:      "transaction-events",
+		dlqTopic:   "transaction-events-dlq",
+		maxRetries: 0,
+		rec:        &fakeReconciler{err: reconcileErr},
+	}
 
 	err := consumer.Run(context.Background())
 	if err == nil {
 		t.Fatal("Run() error = nil, want non-nil")
 	}
-	if !errors.Is(err, reconcileErr) {
-		t.Errorf("Run() error = %v, want it to wrap %v", err, reconcileErr)
+	if !errors.Is(err, dlqPublishErr) {
+		t.Errorf("Run() error = %v, want it to wrap %v", err, dlqPublishErr)
+	}
+}
+
+// TestConsumerReconcileWithRetry drives reconcileWithRetry directly across
+// the attempt-count boundaries: success on the first try, success after a
+// bounded number of failures, exhausting maxRetries+1 attempts, and the
+// MaxRetries=0 boundary where a single attempt is made with no retry.
+func TestConsumerReconcileWithRetry(t *testing.T) {
+	reconcileErr := errors.New("reconcile: database unavailable")
+
+	tests := []struct {
+		name         string
+		maxRetries   int
+		fake         *fakeReconciler
+		wantAttempts int
+		wantErr      error
+	}{
+		{
+			name:         "succeeds on first attempt",
+			maxRetries:   3,
+			fake:         &fakeReconciler{},
+			wantAttempts: 1,
+			wantErr:      nil,
+		},
+		{
+			name:         "succeeds after two failures",
+			maxRetries:   3,
+			fake:         &fakeReconciler{err: reconcileErr, failTimes: 2},
+			wantAttempts: 3,
+			wantErr:      nil,
+		},
+		{
+			name:         "exhausts retries and returns last error",
+			maxRetries:   2,
+			fake:         &fakeReconciler{err: reconcileErr},
+			wantAttempts: 3,
+			wantErr:      reconcileErr,
+		},
+		{
+			name:         "MaxRetries zero allows a single attempt with no retry",
+			maxRetries:   0,
+			fake:         &fakeReconciler{err: reconcileErr},
+			wantAttempts: 1,
+			wantErr:      reconcileErr,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			consumer := &Consumer{maxRetries: testCase.maxRetries, rec: testCase.fake}
+
+			attempts, err := consumer.reconcileWithRetry(context.Background(), ledger.Transaction{})
+
+			if attempts != testCase.wantAttempts {
+				t.Errorf("reconcileWithRetry() attempts = %d, want %d", attempts, testCase.wantAttempts)
+			}
+			if !errors.Is(err, testCase.wantErr) {
+				t.Errorf("reconcileWithRetry() error = %v, want %v", err, testCase.wantErr)
+			}
+			if testCase.fake.calls != testCase.wantAttempts {
+				t.Errorf("Reconcile called %d times, want %d", testCase.fake.calls, testCase.wantAttempts)
+			}
+		})
+	}
+}
+
+// TestConsumerPublishToDLQPublishesEventContent asserts publishToDLQ
+// produces a record on the configured DLQ topic whose key matches the
+// original record's key (so downstream tooling can still group failures by
+// tenant/instrument) and whose JSON body carries every dlqEvent field
+// derived from the original record and failure context.
+func TestConsumerPublishToDLQPublishesEventContent(t *testing.T) {
+	failureErr := errors.New("reconcile: database unavailable")
+	record := &kgo.Record{
+		Topic:     "transaction-events",
+		Partition: 3,
+		Offset:    42,
+		Key:       []byte("tenant-1"),
+		Value:     []byte(`{"event_id":"bad"}`),
+	}
+	fake := &fakeConsumerClient{}
+	consumer := &Consumer{client: fake, dlqTopic: "transaction-events-dlq"}
+
+	before := time.Now().UTC()
+	err := consumer.publishToDLQ(context.Background(), record, failureErr, 2)
+	if err != nil {
+		t.Fatalf("publishToDLQ() error = %v, want nil", err)
+	}
+
+	if len(fake.produced) != 1 {
+		t.Fatalf("produced %d records, want 1", len(fake.produced))
+	}
+	produced := fake.produced[0]
+	if produced.Topic != "transaction-events-dlq" {
+		t.Errorf("produced record topic = %q, want %q", produced.Topic, "transaction-events-dlq")
+	}
+	if string(produced.Key) != "tenant-1" {
+		t.Errorf("produced record key = %q, want %q (original partition key must be preserved)", produced.Key, "tenant-1")
+	}
+
+	var event dlqEvent
+	if err := json.Unmarshal(produced.Value, &event); err != nil {
+		t.Fatalf("unmarshal dlq event: %v", err)
+	}
+	if event.OriginalTopic != record.Topic {
+		t.Errorf("dlqEvent.OriginalTopic = %q, want %q", event.OriginalTopic, record.Topic)
+	}
+	if event.OriginalPartition != record.Partition {
+		t.Errorf("dlqEvent.OriginalPartition = %d, want %d", event.OriginalPartition, record.Partition)
+	}
+	if event.OriginalOffset != record.Offset {
+		t.Errorf("dlqEvent.OriginalOffset = %d, want %d", event.OriginalOffset, record.Offset)
+	}
+	if event.Payload != string(record.Value) {
+		t.Errorf("dlqEvent.Payload = %q, want %q", event.Payload, string(record.Value))
+	}
+	if event.FailureReason != failureErr.Error() {
+		t.Errorf("dlqEvent.FailureReason = %q, want %q", event.FailureReason, failureErr.Error())
+	}
+	if event.Attempts != 2 {
+		t.Errorf("dlqEvent.Attempts = %d, want 2", event.Attempts)
+	}
+	failedAt, err := time.Parse(time.RFC3339Nano, event.FailedAt)
+	if err != nil {
+		t.Fatalf("dlqEvent.FailedAt = %q, want a valid RFC3339Nano timestamp: %v", event.FailedAt, err)
+	}
+	if failedAt.Before(before) {
+		t.Errorf("dlqEvent.FailedAt = %v, want it at or after %v", failedAt, before)
+	}
+}
+
+// TestConsumerPublishToDLQReturnsErrorOnProduceFailure confirms a
+// ProduceSync failure is surfaced as a wrapped error rather than swallowed,
+// since a record that couldn't even reach the DLQ must not be dropped
+// silently.
+func TestConsumerPublishToDLQReturnsErrorOnProduceFailure(t *testing.T) {
+	produceErr := errors.New("dlq topic unavailable")
+	fake := &fakeConsumerClient{produceErr: produceErr}
+	consumer := &Consumer{client: fake, dlqTopic: "transaction-events-dlq"}
+	record := &kgo.Record{Topic: "transaction-events", Value: []byte("payload")}
+
+	err := consumer.publishToDLQ(context.Background(), record, errors.New("boom"), 1)
+	if !errors.Is(err, produceErr) {
+		t.Errorf("publishToDLQ() error = %v, want it to wrap %v", err, produceErr)
+	}
+}
+
+// TestConsumerRunRoutesDecodeFailuresToDLQWithEventContent confirms a
+// record that fails to decode (rather than one that fails reconciliation)
+// is routed to the DLQ topic with attempts=1 and its original location,
+// partition key, and raw payload intact.
+func TestConsumerRunRoutesDecodeFailuresToDLQWithEventContent(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
+	badPayload := []byte(`{not json`)
+	record := &kgo.Record{Topic: "transaction-events", Partition: 3, Offset: 42, Key: []byte("tenant-1"), Value: badPayload}
+	fetches := kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: "transaction-events",
+			Partitions: []kgo.FetchPartition{{
+				Partition: 3,
+				Records:   []*kgo.Record{record},
+			}},
+		}},
+	}}
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{fetches, fetchesWithError("transaction-events", 0, brokerErr)},
+	}
+	consumer := &Consumer{client: fake, topic: "transaction-events", dlqTopic: "transaction-events-dlq", rec: &fakeReconciler{}}
+
+	err := consumer.Run(context.Background())
+	if !errors.Is(err, brokerErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, brokerErr)
+	}
+
+	if len(fake.produced) != 1 {
+		t.Fatalf("produced %d DLQ records, want 1", len(fake.produced))
+	}
+	produced := fake.produced[0]
+	if produced.Topic != "transaction-events-dlq" {
+		t.Errorf("DLQ record topic = %q, want %q", produced.Topic, "transaction-events-dlq")
+	}
+	if string(produced.Key) != "tenant-1" {
+		t.Errorf("DLQ record key = %q, want %q (original partition key must be preserved)", produced.Key, "tenant-1")
+	}
+
+	var event dlqEvent
+	if err := json.Unmarshal(produced.Value, &event); err != nil {
+		t.Fatalf("unmarshal dlq event: %v", err)
+	}
+	if event.OriginalTopic != "transaction-events" {
+		t.Errorf("dlqEvent.OriginalTopic = %q, want %q", event.OriginalTopic, "transaction-events")
+	}
+	if event.OriginalPartition != 3 {
+		t.Errorf("dlqEvent.OriginalPartition = %d, want 3", event.OriginalPartition)
+	}
+	if event.OriginalOffset != 42 {
+		t.Errorf("dlqEvent.OriginalOffset = %d, want 42", event.OriginalOffset)
+	}
+	if event.Payload != string(badPayload) {
+		t.Errorf("dlqEvent.Payload = %q, want %q", event.Payload, string(badPayload))
+	}
+	if event.Attempts != 1 {
+		t.Errorf("dlqEvent.Attempts = %d, want 1 (decode failures aren't retried)", event.Attempts)
+	}
+	if event.FailureReason == "" {
+		t.Error("dlqEvent.FailureReason is empty, want the decode error message")
+	}
+}
+
+// cancelingReconciler is a reconciler test double that cancels ctx as a
+// side effect of the first Reconcile call and always fails, simulating a
+// shutdown signal arriving mid-reconciliation for TestConsumerRunStopsCleanlyWhenCtxCanceledDuringDLQRoute.
+type cancelingReconciler struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (fake *cancelingReconciler) Reconcile(ctx context.Context, txn ledger.Transaction) error {
+	fake.cancel()
+	return fake.err
+}
+
+// TestConsumerRunStopsCleanlyWhenCtxCanceledDuringDLQRoute reproduces the
+// shutdown race: ctx is canceled while a record's reconciliation is failing
+// and it's being routed to the DLQ. The resulting DLQ publish failure is a
+// symptom of shutdown (ProduceSync fails because ctx is already done), not
+// a genuine broker fault, so Run must still return nil rather than
+// surfacing it as an error.
+func TestConsumerRunStopsCleanlyWhenCtxCanceledDuringDLQRoute(t *testing.T) {
+	reconcileErr := errors.New("reconcile: database unavailable")
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{fetchesWithValidRecords("transaction-events", 1)},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	consumer := &Consumer{
+		client:     fake,
+		topic:      "transaction-events",
+		dlqTopic:   "transaction-events-dlq",
+		maxRetries: 0,
+		rec:        &cancelingReconciler{cancel: cancel, err: reconcileErr},
+	}
+
+	err := consumer.Run(ctx)
+	if err != nil {
+		t.Errorf("Run() error = %v, want nil (ctx cancellation during dlq routing must count as clean shutdown, not a fatal error)", err)
 	}
 }
 
@@ -299,12 +646,20 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	if config.GroupID != want.GroupID {
 		t.Errorf("GroupID = %q, want %q", config.GroupID, want.GroupID)
 	}
+	if config.DLQTopic != want.DLQTopic {
+		t.Errorf("DLQTopic = %q, want %q", config.DLQTopic, want.DLQTopic)
+	}
+	if config.MaxRetries != want.MaxRetries {
+		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, want.MaxRetries)
+	}
 }
 
 func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "broker-a:9092,broker-b:9092")
 	t.Setenv("KAFKA_TOPIC", "custom-events")
 	t.Setenv("KAFKA_CONSUMER_GROUP", "custom-group")
+	t.Setenv("KAFKA_DLQ_TOPIC", "custom-events-dlq")
+	t.Setenv("KAFKA_MAX_RETRIES", "5")
 
 	config, err := ConfigFromEnv()
 	if err != nil {
@@ -326,10 +681,54 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	if config.GroupID != "custom-group" {
 		t.Errorf("GroupID = %q, want %q", config.GroupID, "custom-group")
 	}
+	if config.DLQTopic != "custom-events-dlq" {
+		t.Errorf("DLQTopic = %q, want %q", config.DLQTopic, "custom-events-dlq")
+	}
+	if config.MaxRetries != 5 {
+		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, 5)
+	}
+}
+
+// TestConfigFromEnvDLQTopicOnlyOverride confirms KAFKA_DLQ_TOPIC is applied
+// on its own, without any of the other override env vars set, so the field
+// isn't only exercised as part of the "everything overridden" case.
+func TestConfigFromEnvDLQTopicOnlyOverride(t *testing.T) {
+	t.Setenv("KAFKA_DLQ_TOPIC", "custom-events-dlq")
+
+	config, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v, want nil", err)
+	}
+
+	want := LocalConfig()
+	if config.DLQTopic != "custom-events-dlq" {
+		t.Errorf("DLQTopic = %q, want %q", config.DLQTopic, "custom-events-dlq")
+	}
+	if len(config.Brokers) != 1 || config.Brokers[0] != want.Brokers[0] {
+		t.Errorf("Brokers = %v, want %v", config.Brokers, want.Brokers)
+	}
+	if config.Topic != want.Topic {
+		t.Errorf("Topic = %q, want %q", config.Topic, want.Topic)
+	}
+	if config.GroupID != want.GroupID {
+		t.Errorf("GroupID = %q, want %q", config.GroupID, want.GroupID)
+	}
+	if config.MaxRetries != want.MaxRetries {
+		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, want.MaxRetries)
+	}
 }
 
 func TestConfigFromEnvInvalidBrokers(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", " , ")
+
+	_, err := ConfigFromEnv()
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("ConfigFromEnv() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+func TestConfigFromEnvInvalidMaxRetries(t *testing.T) {
+	t.Setenv("KAFKA_MAX_RETRIES", "not-a-number")
 
 	_, err := ConfigFromEnv()
 	if !errors.Is(err, ErrInvalidConfig) {
@@ -344,19 +743,27 @@ func TestConfigValidate(t *testing.T) {
 	}{
 		{
 			name:   "no brokers",
-			config: Config{Topic: "t", GroupID: "g"},
+			config: Config{Topic: "t", GroupID: "g", DLQTopic: "dlq"},
 		},
 		{
 			name:   "blank broker",
-			config: Config{Brokers: []string{" "}, Topic: "t", GroupID: "g"},
+			config: Config{Brokers: []string{" "}, Topic: "t", GroupID: "g", DLQTopic: "dlq"},
 		},
 		{
 			name:   "blank topic",
-			config: Config{Brokers: []string{"localhost:9092"}, GroupID: "g"},
+			config: Config{Brokers: []string{"localhost:9092"}, GroupID: "g", DLQTopic: "dlq"},
 		},
 		{
 			name:   "blank group ID",
-			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t"},
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", DLQTopic: "dlq"},
+		},
+		{
+			name:   "blank DLQ topic",
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", GroupID: "g"},
+		},
+		{
+			name:   "negative max retries",
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", GroupID: "g", DLQTopic: "dlq", MaxRetries: -1},
 		},
 	}
 
@@ -366,6 +773,17 @@ func TestConfigValidate(t *testing.T) {
 				t.Errorf("validate() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
 			}
 		})
+	}
+}
+
+// TestConfigValidateAcceptsZeroMaxRetries confirms MaxRetries=0 is a legal
+// boundary (a single reconciliation attempt with no retry), distinct from
+// the negative value TestConfigValidate already rejects.
+func TestConfigValidateAcceptsZeroMaxRetries(t *testing.T) {
+	config := Config{Brokers: []string{"localhost:9092"}, Topic: "t", GroupID: "g", DLQTopic: "dlq", MaxRetries: 0}
+
+	if err := config.validate(); err != nil {
+		t.Errorf("validate() error = %v, want nil", err)
 	}
 }
 
@@ -381,9 +799,10 @@ func TestNewConsumerRejectsInvalidConfig(t *testing.T) {
 // Kafka infrastructure.
 func TestNewConsumerValidConfig(t *testing.T) {
 	config := Config{
-		Brokers: []string{"127.0.0.1:9"},
-		Topic:   "transaction-events",
-		GroupID: "processor",
+		Brokers:  []string{"127.0.0.1:9"},
+		Topic:    "transaction-events",
+		GroupID:  "processor",
+		DLQTopic: "transaction-events-dlq",
 	}
 
 	consumer, err := NewConsumer(config, &fakeReconciler{})
