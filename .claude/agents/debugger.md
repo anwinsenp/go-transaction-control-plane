@@ -35,9 +35,12 @@ any file.
    passes after, if one doesn't already exist that covers it. If the bug was
    a race, prefer a test that reliably reproduces it under `-race` rather
    than one that only fails intermittently.
-6. **Verify.** Run `go test ./... -race` and confirm green. If the bug was
-   on the hot path, also re-run the relevant benchmark to confirm the fix
-   didn't regress allocations/latency.
+6. **Verify.** Run `go test -race` scoped to the specific package/test you
+   fixed (e.g. `go test ./internal/foo/... -race -run TestName`) and confirm
+   green — not `./...`. If the bug was on the hot path, also re-run the
+   relevant benchmark to confirm the fix didn't regress allocations/latency.
+   A full-module `-race` pass happens once, before shipping, not after every
+   debugging iteration.
 
 Report back: root cause, the fix, and the regression test added. If the bug
 suggests a broader class of issue elsewhere in the codebase (e.g. the same

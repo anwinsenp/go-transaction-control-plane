@@ -125,9 +125,12 @@ them.
 3. Sketch the approach (types/signatures) before filling in logic,
    especially for anything non-trivial or touching the hot path.
 4. Write the code.
-5. Self-review: run gofmt/vet/build/test (and benchmarks, if hot-path),
-   then re-read the diff once for naming, error handling, and edge cases
-   before calling it done.
+5. Self-review: while iterating, scope gofmt/vet/build/test (and
+   benchmarks, if hot-path) to the package(s) you're touching — a full
+   `./...` run on every iteration is wasted work. Run the full-repo gate
+   (`gofmt -l .`, `go vet ./...`, `go build ./...`, `go test ./...`) exactly
+   once, as the last step before calling the task done, then re-read the
+   diff once for naming, error handling, and edge cases.
 6. Summarize what changed and why in plain language.
 
 ## Guardrails (things not to do without asking)

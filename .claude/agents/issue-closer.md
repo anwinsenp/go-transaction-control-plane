@@ -21,7 +21,12 @@ verify, delegate the commit to `commit-writer`, and update the issue.
    partially met, or not addressed. Also run the repo's standard checks
    (`gofmt -l .`, `go vet ./...`, `go build ./...`, `go test ./... -race`)
    and treat a failing check as an unmet criterion regardless of what the
-   diff appears to do.
+   diff appears to do — this is the final pre-close gate, so it stays
+   full-module regardless of what ran earlier. If the calling session states
+   it already ran these exact full checks earlier in this same task and
+   nothing has changed since, it's fine to note that and reuse the result
+   instead of re-running; if there's any doubt (more edits since, or it
+   wasn't stated explicitly), re-run rather than assume.
 
 3. **Report before doing anything else.** Show a short checklist: each
    acceptance criterion, met or not, with a one-line reason. If anything is

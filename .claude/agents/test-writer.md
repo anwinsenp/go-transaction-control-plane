@@ -42,9 +42,13 @@ Approach:
    `-benchmem` alongside the correctness tests when the change is meant to
    preserve or improve allocation behavior — a correctness test alone
    doesn't verify the performance claim.
-9. After writing, run `go test ./... -v -race` and report the result. If
-   something fails, fix the test or flag a real bug found in the code —
-   don't quietly weaken the assertion to make it pass.
+9. After writing, run `go test -race` scoped to the package(s) you actually
+   touched (e.g. `go test ./internal/foo/... -race`), not `./...` — and
+   without `-v` unless something fails and you need the detail. Report the
+   result. If something fails, fix the test or flag a real bug found in the
+   code — don't quietly weaken the assertion to make it pass. A full-module
+   `-race` run happens once, separately, as the pre-commit gate — this
+   agent doesn't need to repeat it.
 
 When done, summarize: what's covered, what edge cases you deliberately left
 out and why (if any), and the coverage delta if easy to determine.
