@@ -15,6 +15,7 @@ import (
 // Side identifies the direction of a trade.
 type Side string
 
+// The two directions a Side may take.
 const (
 	SideBuy  Side = "BUY"
 	SideSell Side = "SELL"

@@ -62,7 +62,7 @@ var jsonResponsePool = sync.Pool{
 
 // writeJSON encodes value into a pooled buffer and writes it as a JSON
 // response with the given status code.
-func writeJSON(w http.ResponseWriter, status int, value any) {
+func writeJSON(rsp http.ResponseWriter, status int, value any) {
 	codec := jsonResponsePool.Get().(*jsonResponseCodec)
 	defer func() {
 		codec.buf.Reset()
@@ -71,13 +71,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 	if err := codec.enc.Encode(value); err != nil {
 		log.Printf("encode json response: %v", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(rsp, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if _, err := w.Write(codec.buf.Bytes()); err != nil {
+	rsp.Header().Set("Content-Type", "application/json")
+	rsp.WriteHeader(status)
+	if _, err := rsp.Write(codec.buf.Bytes()); err != nil {
 		log.Printf("write json response: %v", err)
 	}
 }
@@ -113,8 +113,8 @@ type errorResponse struct {
 // publisher, and acknowledges receipt only once the publish has durably
 // succeeded.
 func newTransactionHandler(publisher ingestion.Publisher) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxTransactionEventBytes)
+	return func(rsp http.ResponseWriter, req *http.Request) {
+		req.Body = http.MaxBytesReader(rsp, req.Body, maxTransactionEventBytes)
 
 		body := transactionBodyPool.Get().(*bytes.Buffer)
 		defer func() {
@@ -122,8 +122,8 @@ func newTransactionHandler(publisher ingestion.Publisher) http.HandlerFunc {
 			transactionBodyPool.Put(body)
 		}()
 
-		if _, err := body.ReadFrom(r.Body); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		if _, err := body.ReadFrom(req.Body); err != nil {
+			writeJSONError(rsp, http.StatusBadRequest, "invalid request body")
 			return
 		}
 
@@ -139,33 +139,33 @@ func newTransactionHandler(publisher ingestion.Publisher) http.HandlerFunc {
 
 		decoder := json.NewDecoder(reader)
 		if err := decoder.Decode(event); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body")
+			writeJSONError(rsp, http.StatusBadRequest, "invalid request body")
 			return
 		}
 
 		if trailing := body.Bytes()[decoder.InputOffset():]; !isJSONWhitespace(trailing) {
-			writeJSONError(w, http.StatusBadRequest, "invalid request body: trailing data")
+			writeJSONError(rsp, http.StatusBadRequest, "invalid request body: trailing data")
 			return
 		}
 
 		if err := event.validate(); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			writeJSONError(rsp, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		ingestionEvent, err := event.toIngestionEvent()
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			writeJSONError(rsp, http.StatusBadRequest, err.Error())
 			return
 		}
 
-		if err := publisher.Publish(r.Context(), ingestionEvent); err != nil {
+		if err := publisher.Publish(req.Context(), ingestionEvent); err != nil {
 			log.Printf("%v", fmt.Errorf("publish transaction event %s: %w", event.EventID, err))
-			writeJSONError(w, http.StatusServiceUnavailable, "failed to publish transaction event")
+			writeJSONError(rsp, http.StatusServiceUnavailable, "failed to publish transaction event")
 			return
 		}
 
-		writeJSON(w, http.StatusAccepted, event)
+		writeJSON(rsp, http.StatusAccepted, event)
 	}
 }
 
@@ -320,6 +320,6 @@ func isJSONWhitespace(data []byte) bool {
 }
 
 // writeJSONError writes a JSON error body with the given HTTP status.
-func writeJSONError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorResponse{Error: message})
+func writeJSONError(rsp http.ResponseWriter, status int, message string) {
+	writeJSON(rsp, status, errorResponse{Error: message})
 }

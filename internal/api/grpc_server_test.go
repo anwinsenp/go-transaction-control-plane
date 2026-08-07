@@ -51,8 +51,43 @@ func freeTCPAddr(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("reserve free port: %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Errorf("listener.Close() error = %v", closeErr)
+		}
+	}()
 	return listener.Addr().String()
+}
+
+// startServerAsync starts server in a background goroutine, reporting a test
+// failure for any Start() error other than grpc.ErrServerStopped, which is
+// the expected return once the test's deferred Shutdown runs.
+func startServerAsync(t *testing.T, server *GRPCServer) {
+	t.Helper()
+	go func() {
+		if err := server.Start(); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			t.Errorf("Start() error = %v", err)
+		}
+	}()
+}
+
+// shutdownServer shuts server down within a bounded timeout, failing the
+// test if Shutdown returns an error.
+func shutdownServer(t *testing.T, server *GRPCServer) {
+	t.Helper()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Errorf("Shutdown() error = %v", err)
+	}
+}
+
+// closeConn closes conn, failing the test if Close returns an error.
+func closeConn(t *testing.T, conn *grpc.ClientConn) {
+	t.Helper()
+	if err := conn.Close(); err != nil {
+		t.Errorf("conn.Close() error = %v", err)
+	}
 }
 
 func TestNewGRPCServerRejectsInvalidAPIKeys(t *testing.T) {
@@ -109,15 +144,11 @@ func TestGRPCServerServesTransactionIngestionAndHealth(t *testing.T) {
 	addr := freeTCPAddr(t)
 	server := newTestGRPCServer(t, addr, &fakePublisher{})
 
-	go server.Start()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
+	startServerAsync(t, server)
+	defer shutdownServer(t, server)
 
 	conn := dialWithRetry(t, addr)
-	defer conn.Close()
+	defer closeConn(t, conn)
 
 	// The health check must stay reachable without credentials so
 	// orchestrator liveness/readiness probes don't need an API key.
@@ -144,15 +175,11 @@ func TestGRPCServerRejectsIngestTransactionWithoutValidAPIKey(t *testing.T) {
 	addr := freeTCPAddr(t)
 	server := newTestGRPCServer(t, addr, &fakePublisher{})
 
-	go server.Start()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
+	startServerAsync(t, server)
+	defer shutdownServer(t, server)
 
 	conn := dialWithRetry(t, addr)
-	defer conn.Close()
+	defer closeConn(t, conn)
 
 	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
 
@@ -188,15 +215,11 @@ func TestGRPCServerConcurrentIngestTransaction(t *testing.T) {
 	publisher := &fakePublisher{}
 	server := newTestGRPCServer(t, addr, publisher)
 
-	go server.Start()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
+	startServerAsync(t, server)
+	defer shutdownServer(t, server)
 
 	conn := dialWithRetry(t, addr)
-	defer conn.Close()
+	defer closeConn(t, conn)
 
 	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
 
@@ -250,15 +273,11 @@ func TestGRPCServerRejectsIngestTransactionOverRateLimit(t *testing.T) {
 		t.Fatalf("NewGRPCServer() error = %v", err)
 	}
 
-	go server.Start()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
+	startServerAsync(t, server)
+	defer shutdownServer(t, server)
 
 	conn := dialWithRetry(t, addr)
-	defer conn.Close()
+	defer closeConn(t, conn)
 
 	ingestionClient := ingestionv1.NewTransactionIngestionServiceClient(conn)
 
@@ -299,7 +318,9 @@ func dialWithRetry(t *testing.T, addr string) *grpc.ClientConn {
 			return conn
 		}
 		lastErr = err
-		conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("conn.Close() error = %v", closeErr)
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 

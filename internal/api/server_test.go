@@ -21,6 +21,15 @@ const testHTTPAPIKey = "test-api-key"
 // tighter configuration.
 var testRateLimitConfig = RateLimitConfig{RequestsPerSecond: 1000, Burst: 1000}
 
+// closeBody closes response's body, failing the test if Close returns an
+// error.
+func closeBody(t *testing.T, response *http.Response) {
+	t.Helper()
+	if err := response.Body.Close(); err != nil {
+		t.Errorf("response.Body.Close() error = %v", err)
+	}
+}
+
 // newTestServer builds a Server configured with testHTTPAPIKey, failing the
 // test if construction fails.
 func newTestServer(t *testing.T, addr string, publisher ingestion.Publisher) *Server {
@@ -125,7 +134,7 @@ func TestServerRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("do request: %v", err)
 			}
-			defer response.Body.Close()
+			defer closeBody(t, response)
 
 			if response.StatusCode != testCase.wantStatus {
 				t.Errorf("status = %d, want %d", response.StatusCode, testCase.wantStatus)
@@ -166,7 +175,7 @@ func TestServerRoutePublishFailureReturns503(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
-	defer response.Body.Close()
+	defer closeBody(t, response)
 
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
@@ -211,7 +220,7 @@ func TestServerRejectsTransactionsWithoutValidAPIKey(t *testing.T) {
 			if err != nil {
 				t.Fatalf("do request: %v", err)
 			}
-			defer response.Body.Close()
+			defer closeBody(t, response)
 
 			if response.StatusCode != http.StatusUnauthorized {
 				t.Errorf("status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
@@ -246,7 +255,7 @@ func TestServerHealthzDoesNotRequireAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
-	defer response.Body.Close()
+	defer closeBody(t, response)
 
 	if response.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusOK)
@@ -286,7 +295,7 @@ func TestServerRejectsTransactionsOverRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
-	defer firstResponse.Body.Close()
+	defer closeBody(t, firstResponse)
 	if firstResponse.StatusCode != http.StatusAccepted {
 		t.Fatalf("first request status = %d, want %d", firstResponse.StatusCode, http.StatusAccepted)
 	}
@@ -295,7 +304,7 @@ func TestServerRejectsTransactionsOverRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
-	defer secondResponse.Body.Close()
+	defer closeBody(t, secondResponse)
 	if secondResponse.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("second request status = %d, want %d", secondResponse.StatusCode, http.StatusTooManyRequests)
 	}

@@ -1,0 +1,90 @@
+# golangci-lint v2 config. Sections below are grouped to mirror the
+# "Coding standards" section of CLAUDE.md — each linter is enabled because
+# it enforces (or approximates) a rule stated there. Where a rule isn't
+# machine-checkable (e.g. "prefer clarity over cleverness"), it's left out
+# rather than approximated with a noisy proxy.
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    # CLAUDE.md: "Every change must pass ... gofmt -l ."
+    - gofmt
+    # Natural pairing with gofmt: keeps import grouping/ordering consistent,
+    # which gofmt alone does not enforce.
+    - goimports
+
+linters:
+  enable:
+    # CLAUDE.md: "Every change must pass ... go vet ./..."
+    - govet
+
+    # CLAUDE.md errors section: "wrap with fmt.Errorf(...: %w...), never
+    # swallow" — errcheck catches swallowed errors, errorlint catches
+    # non-%w wrapping and incorrect errors.Is/As usage across wrapped chains.
+    - errcheck
+    - errorlint
+
+    # CLAUDE.md concurrency section: "context.Context as the first
+    # parameter for anything that can block or is cancellable" and
+    # "guard shared state explicitly" — govet's own copylocks/loopclosure
+    # analyzers (enabled by default with govet above) cover mutex-copy and
+    # loop-variable-capture bugs; contextcheck flags context args that are
+    # created fresh instead of propagated, which often signals a broken
+    # cancellation chain.
+    - contextcheck
+
+    # CLAUDE.md: "No global mutable state unless the task is trivial
+    # enough that it's clearly fine." Left at default settings, which
+    # already exempts common trivial cases (e.g. errors declared at
+    # package scope); tighten with linters-settings if it proves noisy.
+    - gochecknoglobals
+
+    # CLAUDE.md naming section: "Variable names should be at least 3
+    # characters ... Standard short idioms are still fine: err, ctx, i, j,
+    # ok."
+    - varnamelen
+
+    # CLAUDE.md comments section: "Exported identifiers still get a proper
+    # doc comment ... that's required, not extra." revive's exported rule
+    # enforces doc-comment presence/format on exported identifiers; it
+    # supersedes the deprecated golint.
+    - revive
+
+  settings:
+    varnamelen:
+      min-name-length: 3
+      ignore-names:
+        - err
+        - ctx
+        - ok
+      ignore-decls:
+        - i int
+        - j int
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+
+  exclusions:
+    rules:
+      # Table-driven test files legitimately use short loop vars (tc, tt),
+      # don't need exported-style doc comments, and commonly rely on
+      # package-level fixtures/sync.Once guards that CLAUDE.md's
+      # no-globals rule is not aimed at (it targets production code).
+      - path: _test\.go
+        linters:
+          - varnamelen
+          - revive
+          - gochecknoglobals
+
+      # CLAUDE.md's hot-path section explicitly recommends sync.Pool for
+      # reused buffers/objects; a package-level sync.Pool is the idiomatic
+      # way to declare one, so it's exempted from the no-globals rule
+      # rather than pushed into a per-call constructor that would defeat
+      # the point of pooling.
+      - source: 'sync\.Pool'
+        linters:
+          - gochecknoglobals
