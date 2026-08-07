@@ -1,5 +1,7 @@
 # go-transaction-control-plane
 
+[![CI](https://github.com/anwinsenp/go-transaction-control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/anwinsenp/go-transaction-control-plane/actions/workflows/ci.yml)
+
 A distributed, real-time transaction processing engine in Go: a
 zero-allocation ingestion hot path, Kafka-based event streaming, a
 Postgres-backed reconciliation layer, a custom Kubernetes operator for
