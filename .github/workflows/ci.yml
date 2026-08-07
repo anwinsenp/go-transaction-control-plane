@@ -9,6 +9,38 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: transaction_control_plane
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      kafka:
+        image: bitnami/kafka:3.7
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_CFG_NODE_ID: "0"
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@localhost:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          ALLOW_PLAINTEXT_LISTENER: "yes"
+        options: >-
+          --health-cmd "kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,6 +67,9 @@ jobs:
         run: go build ./...
 
       - name: go test
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/transaction_control_plane?sslmode=disable
+          KAFKA_BROKERS: localhost:9092
         run: go test ./... -race
 
       - name: golangci-lint
