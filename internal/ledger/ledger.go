@@ -59,6 +59,12 @@ var ErrNotFound = errors.New("ledger: not found")
 // rather than double-counting it.
 var ErrDuplicateEvent = errors.New("ledger: duplicate event id")
 
+// ErrStaleReconciledState is returned by ReconciledStateRepository.Upsert
+// when state.LastTransactionID does not advance past the row's current
+// LastTransactionID, so a caller computing an update from a since-outdated
+// read can't clobber a newer one applied concurrently.
+var ErrStaleReconciledState = errors.New("ledger: reconciled state upsert is stale")
+
 // TransactionRepository persists and retrieves trade ledger entries.
 type TransactionRepository interface {
 	Insert(ctx context.Context, txn Transaction) (Transaction, error)
@@ -69,6 +75,12 @@ type TransactionRepository interface {
 // ReconciledStateRepository persists and retrieves per-tenant,
 // per-instrument reconciled P&L state.
 type ReconciledStateRepository interface {
+	// Upsert writes state, applying it only if state.LastTransactionID
+	// advances past the row's existing LastTransactionID (or the row
+	// doesn't exist yet). It returns ErrStaleReconciledState, without
+	// writing anything, if that isn't the case — implementations must
+	// enforce this as a single atomic operation so two racing callers
+	// can't both observe success while one clobbers the other's update.
 	Upsert(ctx context.Context, state ReconciledState) error
 	Get(ctx context.Context, tenantID, instrument string) (ReconciledState, error)
 }

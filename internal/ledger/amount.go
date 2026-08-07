@@ -3,6 +3,7 @@ package ledger
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -164,4 +165,38 @@ func FormatAmount(value int64) string {
 	builder.WriteByte('.')
 	builder.WriteString(digits[split:])
 	return builder.String()
+}
+
+// MulAmount multiplies two fixed-point values both scaled by AmountScale,
+// returning their product still scaled by AmountScale (i.e. it computes
+// (a*b)/AmountScale). It goes through math/big rather than native int64
+// arithmetic because the raw product of two values near MaxAmount
+// (~10^18 each) is on the order of 10^36, far beyond what int64 or even
+// uint64 can hold before it's rescaled back down. The final division
+// truncates toward zero (big.Int.Quo, not rounded), matching AmountScale's
+// existing precision floor of 1e-8 — deliberate, not an oversight.
+func MulAmount(a, b int64) (int64, error) {
+	product := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+	product.Quo(product, big.NewInt(AmountScale))
+	if !product.IsInt64() {
+		return 0, fmt.Errorf("multiply amount: %d * %d overflows int64 once rescaled", a, b)
+	}
+	return product.Int64(), nil
+}
+
+// DivAmount divides two fixed-point values both scaled by AmountScale,
+// returning their quotient still scaled by AmountScale (i.e. it computes
+// (a*AmountScale)/b). Like MulAmount, it uses math/big because a*AmountScale
+// can exceed int64 before the division brings it back into range, and like
+// MulAmount it truncates toward zero rather than rounding.
+func DivAmount(a, b int64) (int64, error) {
+	if b == 0 {
+		return 0, fmt.Errorf("divide amount: %d / %d: division by zero", a, b)
+	}
+	quotient := new(big.Int).Mul(big.NewInt(a), big.NewInt(AmountScale))
+	quotient.Quo(quotient, big.NewInt(b))
+	if !quotient.IsInt64() {
+		return 0, fmt.Errorf("divide amount: %d / %d overflows int64 once rescaled", a, b)
+	}
+	return quotient.Int64(), nil
 }

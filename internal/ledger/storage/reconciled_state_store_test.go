@@ -39,9 +39,15 @@ func TestReconciledStateStore_UpsertInsertsAndUpdates(t *testing.T) {
 		t.Fatalf("Get after insert: position = %d, want %d", got.Position, initial.Position)
 	}
 
+	secondTxn, err := txnStore.Insert(ctx, sampleTransaction())
+	if err != nil {
+		t.Fatalf("Insert second transaction: %v", err)
+	}
+
 	updated := initial
 	updated.Position = 20 * ledger.AmountScale
 	updated.RealizedPnL = 1525000000 // 15.25
+	updated.LastTransactionID = &secondTxn.ID
 	if err := store.Upsert(ctx, updated); err != nil {
 		t.Fatalf("Upsert (update): %v", err)
 	}

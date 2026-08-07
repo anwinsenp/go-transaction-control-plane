@@ -6,8 +6,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
+
+// fakeReconciler is a reconciler test double that records every
+// transaction it's asked to reconcile, so Consumer's decode-and-dispatch
+// behavior can be tested without a real Reconciler or Postgres.
+type fakeReconciler struct {
+	reconciled []ledger.Transaction
+	err        error
+}
+
+func (fake *fakeReconciler) Reconcile(ctx context.Context, txn ledger.Transaction) error {
+	if fake.err != nil {
+		return fake.err
+	}
+	fake.reconciled = append(fake.reconciled, txn)
+	return nil
+}
 
 // fakeConsumerClient is a consumerClient test double that returns
 // caller-configured fetches/errors on each PollFetches call, so Consumer's
@@ -64,11 +83,133 @@ func fetchesWithError(topic string, partition int32, err error) kgo.Fetches {
 	}}
 }
 
+func TestDecodeTransaction(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    ledger.Transaction
+		wantErr bool
+	}{
+		{
+			name: "valid payload round-trips",
+			payload: `{
+				"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+				"tenant_id": "tenant-1",
+				"schema_version": 1,
+				"instrument": "AAPL",
+				"side": "BUY",
+				"quantity": "10",
+				"price": "150.5",
+				"currency": "USD",
+				"occurred_at": "2026-01-02T15:04:05.999999999Z"
+			}`,
+			want: ledger.Transaction{
+				EventID:       uuid.MustParse("3fa85f64-5717-4562-b3fc-2c963f66afa6"),
+				TenantID:      "tenant-1",
+				SchemaVersion: 1,
+				Instrument:    "AAPL",
+				Side:          ledger.SideBuy,
+				Quantity:      10 * ledger.AmountScale,
+				Price:         mustAmount(t, "150.5"),
+				Currency:      "USD",
+				OccurredAt:    time.Date(2026, 1, 2, 15, 4, 5, 999999999, time.UTC),
+			},
+		},
+		{
+			name:    "invalid json",
+			payload: `{not json`,
+			wantErr: true,
+		},
+		{
+			name:    "bad uuid",
+			payload: `{"event_id": "not-a-uuid", "occurred_at": "2026-01-02T15:04:05Z", "quantity": "1", "price": "1"}`,
+			wantErr: true,
+		},
+		{
+			name:    "bad quantity",
+			payload: `{"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "occurred_at": "2026-01-02T15:04:05Z", "quantity": "not-a-number", "price": "1"}`,
+			wantErr: true,
+		},
+		{
+			name:    "bad price",
+			payload: `{"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "occurred_at": "2026-01-02T15:04:05Z", "quantity": "1", "price": "not-a-number"}`,
+			wantErr: true,
+		},
+		{
+			name:    "bad occurred_at",
+			payload: `{"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6", "occurred_at": "not-a-timestamp", "quantity": "1", "price": "1"}`,
+			wantErr: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := decodeTransaction([]byte(testCase.payload))
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("decodeTransaction() = %+v, nil, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeTransaction() error = %v, want nil", err)
+			}
+			if got != testCase.want {
+				t.Errorf("decodeTransaction() = %+v, want %+v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// mustAmount parses a decimal literal known to be valid at compile time,
+// failing the test immediately rather than returning a zero value on error.
+func mustAmount(t *testing.T, value string) int64 {
+	t.Helper()
+	amount, err := ledger.ParseAmount(value)
+	if err != nil {
+		t.Fatalf("ParseAmount(%q): %v", value, err)
+	}
+	return amount
+}
+
+func TestConsumerRunReconcileErrorAbortsRun(t *testing.T) {
+	validPayload := []byte(`{
+		"event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+		"tenant_id": "tenant-1",
+		"instrument": "AAPL",
+		"side": "BUY",
+		"quantity": "10",
+		"price": "150.5",
+		"currency": "USD",
+		"occurred_at": "2026-01-02T15:04:05Z"
+	}`)
+	fetches := kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: "transaction-events",
+			Partitions: []kgo.FetchPartition{{
+				Partition: 0,
+				Records:   []*kgo.Record{{Topic: "transaction-events", Value: validPayload}},
+			}},
+		}},
+	}}
+	reconcileErr := errors.New("reconcile: database unavailable")
+	fake := &fakeConsumerClient{fetches: []kgo.Fetches{fetches}}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{err: reconcileErr}}
+
+	err := consumer.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run() error = nil, want non-nil")
+	}
+	if !errors.Is(err, reconcileErr) {
+		t.Errorf("Run() error = %v, want it to wrap %v", err, reconcileErr)
+	}
+}
+
 func TestConsumerRunStopsCleanlyOnContextCancel(t *testing.T) {
 	fake := &fakeConsumerClient{
 		fetches: []kgo.Fetches{fetchesWithRecords("transaction-events", 3)},
 	}
-	consumer := &Consumer{client: fake, topic: "transaction-events"}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErrors := make(chan error, 1)
@@ -104,7 +245,7 @@ func TestConsumerRunMultipleFetchesIncludingEmpty(t *testing.T) {
 			fetchesWithError("transaction-events", 0, brokerErr),
 		},
 	}
-	consumer := &Consumer{client: fake, topic: "transaction-events"}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{}}
 
 	err := consumer.Run(context.Background())
 	if !errors.Is(err, brokerErr) {
@@ -121,7 +262,7 @@ func TestConsumerRunWrapsBrokerFetchError(t *testing.T) {
 	fake := &fakeConsumerClient{
 		fetches: []kgo.Fetches{fetchesWithError("transaction-events", 2, brokerErr)},
 	}
-	consumer := &Consumer{client: fake, topic: "transaction-events"}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{}}
 
 	err := consumer.Run(context.Background())
 	if err == nil {
@@ -134,7 +275,7 @@ func TestConsumerRunWrapsBrokerFetchError(t *testing.T) {
 
 func TestConsumerClose(t *testing.T) {
 	fake := &fakeConsumerClient{}
-	consumer := &Consumer{client: fake, topic: "transaction-events"}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{}}
 
 	consumer.Close()
 
@@ -229,7 +370,7 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestNewConsumerRejectsInvalidConfig(t *testing.T) {
-	if _, err := NewConsumer(Config{}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := NewConsumer(Config{}, &fakeReconciler{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("NewConsumer() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
 	}
 }
@@ -245,7 +386,7 @@ func TestNewConsumerValidConfig(t *testing.T) {
 		GroupID: "processor",
 	}
 
-	consumer, err := NewConsumer(config)
+	consumer, err := NewConsumer(config, &fakeReconciler{})
 	if err != nil {
 		t.Fatalf("NewConsumer() error = %v, want nil", err)
 	}

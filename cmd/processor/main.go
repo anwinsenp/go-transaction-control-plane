@@ -12,8 +12,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger/storage"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/processor"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/processor/kafka"
 )
+
+// defaultDatabaseURL matches the docker-compose local stack's Postgres
+// instance, mirroring how kafka.LocalConfig defaults to the local broker.
+const defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/transactions?sslmode=disable"
 
 func main() {
 	if err := run(); err != nil {
@@ -25,12 +31,31 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = defaultDatabaseURL
+	}
+	poolConfig, err := storage.PoolConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve postgres pool config: %w", err)
+	}
+	pool, err := storage.NewPool(ctx, databaseURL, poolConfig)
+	if err != nil {
+		return fmt.Errorf("create postgres pool: %w", err)
+	}
+	defer pool.Close()
+
+	reconciler := processor.NewReconciler(
+		storage.NewTransactionStore(pool),
+		storage.NewReconciledStateStore(pool),
+	)
+
 	kafkaConfig, err := kafka.ConfigFromEnv()
 	if err != nil {
 		return fmt.Errorf("resolve kafka config: %w", err)
 	}
 
-	consumer, err := kafka.NewConsumer(kafkaConfig)
+	consumer, err := kafka.NewConsumer(kafkaConfig, reconciler)
 	if err != nil {
 		return fmt.Errorf("create kafka consumer: %w", err)
 	}

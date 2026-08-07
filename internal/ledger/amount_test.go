@@ -104,6 +104,88 @@ func TestFormatAmount(t *testing.T) {
 	}
 }
 
+func TestMulAmount(t *testing.T) {
+	tests := []struct {
+		name    string
+		a       int64
+		b       int64
+		want    int64
+		wantErr bool
+	}{
+		{name: "whole numbers", a: 2 * AmountScale, b: 3 * AmountScale, want: 6 * AmountScale},
+		{name: "fractional operands", a: mustAmount(t, "1.5"), b: mustAmount(t, "2.5"), want: mustAmount(t, "3.75")},
+		{name: "one negative operand", a: mustAmount(t, "-2"), b: mustAmount(t, "3"), want: mustAmount(t, "-6")},
+		{name: "both negative operands", a: mustAmount(t, "-2"), b: mustAmount(t, "-3"), want: mustAmount(t, "6")},
+		{name: "multiply by zero", a: mustAmount(t, "12345.6789"), b: 0, want: 0},
+		{name: "overflow near MaxAmount", a: MaxAmount, b: MaxAmount, wantErr: true},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := MulAmount(testCase.a, testCase.b)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("MulAmount(%d, %d) = %d, nil, want an error", testCase.a, testCase.b, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MulAmount(%d, %d) error = %v, want nil", testCase.a, testCase.b, err)
+			}
+			if got != testCase.want {
+				t.Errorf("MulAmount(%d, %d) = %d, want %d", testCase.a, testCase.b, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestDivAmount(t *testing.T) {
+	tests := []struct {
+		name    string
+		a       int64
+		b       int64
+		want    int64
+		wantErr bool
+	}{
+		{name: "whole numbers", a: 6 * AmountScale, b: 3 * AmountScale, want: 2 * AmountScale},
+		{name: "fractional quotient", a: mustAmount(t, "1"), b: mustAmount(t, "4"), want: mustAmount(t, "0.25")},
+		{name: "one negative operand", a: mustAmount(t, "-6"), b: mustAmount(t, "3"), want: mustAmount(t, "-2")},
+		{name: "both negative operands", a: mustAmount(t, "-6"), b: mustAmount(t, "-3"), want: mustAmount(t, "2")},
+		{name: "zero dividend", a: 0, b: mustAmount(t, "5"), want: 0},
+		{name: "division by zero", a: mustAmount(t, "5"), b: 0, wantErr: true},
+		{name: "overflow near MaxAmount divided by a tiny divisor", a: MaxAmount, b: 1, wantErr: true},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := DivAmount(testCase.a, testCase.b)
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("DivAmount(%d, %d) = %d, nil, want an error", testCase.a, testCase.b, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DivAmount(%d, %d) error = %v, want nil", testCase.a, testCase.b, err)
+			}
+			if got != testCase.want {
+				t.Errorf("DivAmount(%d, %d) = %d, want %d", testCase.a, testCase.b, got, testCase.want)
+			}
+		})
+	}
+}
+
+// mustAmount parses a decimal literal known to be valid at compile time,
+// failing the test immediately rather than returning a zero value on error.
+func mustAmount(t *testing.T, value string) int64 {
+	t.Helper()
+	amount, err := ParseAmount(value)
+	if err != nil {
+		t.Fatalf("ParseAmount(%q): %v", value, err)
+	}
+	return amount
+}
+
 func TestParseAmountFormatAmountRoundTrip(t *testing.T) {
 	values := []string{"1", "0.00000001", "12345.6789", "100000.00000000"}
 

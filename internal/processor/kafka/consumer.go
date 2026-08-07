@@ -1,18 +1,23 @@
-// Package kafka provides the Kafka-backed consumer skeleton for the
-// processor service. It connects to and reads from the configured
-// transaction topic; decoding and reconciliation logic are added in a
-// later change once the processor's domain layer exists.
+// Package kafka provides the Kafka-backed consumer for the processor
+// service: it connects to and reads from the configured transaction topic,
+// decodes each record's wire payload, and hands the resulting transaction
+// to a reconciler for idempotent P&L reconciliation.
 package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 )
 
 // ErrInvalidConfig indicates a Config failed validation.
@@ -92,17 +97,25 @@ type consumerClient interface {
 	Close()
 }
 
-// Consumer reads records from the processor's transaction topic. It is a
-// connectivity skeleton: Run logs what it consumes but does not yet decode
-// or reconcile records.
+// reconciler applies a decoded transaction to reconciled P&L state.
+// Satisfied by *processor.Reconciler; declared locally so this package
+// doesn't need to import internal/processor just for the type name.
+type reconciler interface {
+	Reconcile(ctx context.Context, txn ledger.Transaction) error
+}
+
+// Consumer reads records from the processor's transaction topic, decodes
+// each record's wire payload, and reconciles it via rec.
 type Consumer struct {
 	client consumerClient
 	topic  string
+	rec    reconciler
 }
 
 // NewConsumer builds a Consumer connected to the brokers in cfg, joined to
-// cfg.GroupID and subscribed to cfg.Topic.
-func NewConsumer(cfg Config) (*Consumer, error) {
+// cfg.GroupID and subscribed to cfg.Topic. Every decoded record is handed to
+// rec for idempotent reconciliation.
+func NewConsumer(cfg Config, rec reconciler) (*Consumer, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("new kafka consumer: %w", err)
 	}
@@ -117,13 +130,70 @@ func NewConsumer(cfg Config) (*Consumer, error) {
 		return nil, fmt.Errorf("new kafka consumer: create client: %w", err)
 	}
 
-	return &Consumer{client: client, topic: cfg.Topic}, nil
+	return &Consumer{client: client, topic: cfg.Topic, rec: rec}, nil
 }
 
-// Run polls the configured topic until ctx is canceled, logging the number
-// of records consumed per fetch. It returns nil on a clean shutdown (ctx
-// canceled) and a wrapped error if the broker reports a fetch failure that
-// isn't attributable to shutdown.
+// wireEvent is the JSON shape read from the Kafka payload, matching
+// internal/ingestion/kafka's wireEvent encoding.
+type wireEvent struct {
+	EventID       string `json:"event_id"`
+	TenantID      string `json:"tenant_id"`
+	SchemaVersion int16  `json:"schema_version"`
+	Instrument    string `json:"instrument"`
+	Side          string `json:"side"`
+	Quantity      string `json:"quantity"`
+	Price         string `json:"price"`
+	Currency      string `json:"currency"`
+	OccurredAt    string `json:"occurred_at"`
+}
+
+// decodeTransaction parses a Kafka record's JSON payload into a
+// ledger.Transaction ready to be reconciled.
+func decodeTransaction(value []byte) (ledger.Transaction, error) {
+	var wire wireEvent
+	if err := json.Unmarshal(value, &wire); err != nil {
+		return ledger.Transaction{}, fmt.Errorf("decode transaction event: unmarshal payload: %w", err)
+	}
+
+	eventID, err := uuid.Parse(wire.EventID)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("decode transaction event: parse event id: %w", err)
+	}
+
+	quantity, err := ledger.ParseAmount(wire.Quantity)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("decode transaction event: parse quantity: %w", err)
+	}
+	price, err := ledger.ParseAmount(wire.Price)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("decode transaction event: parse price: %w", err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339Nano, wire.OccurredAt)
+	if err != nil {
+		return ledger.Transaction{}, fmt.Errorf("decode transaction event: parse occurred_at: %w", err)
+	}
+
+	return ledger.Transaction{
+		EventID:       eventID,
+		TenantID:      wire.TenantID,
+		SchemaVersion: wire.SchemaVersion,
+		Instrument:    wire.Instrument,
+		Side:          ledger.Side(wire.Side),
+		Quantity:      quantity,
+		Price:         price,
+		Currency:      wire.Currency,
+		OccurredAt:    occurredAt,
+	}, nil
+}
+
+// Run polls the configured topic until ctx is canceled, decoding and
+// reconciling each record. It returns nil on a clean shutdown (ctx
+// canceled) and a wrapped error if the broker reports a fetch failure or
+// reconciliation fails in a way that isn't attributable to shutdown. A
+// record whose payload can't be decoded is logged and skipped rather than
+// failing the whole consumer, since a single malformed message shouldn't
+// block every other tenant's events on the same partition.
 func (con *Consumer) Run(ctx context.Context) error {
 	for {
 		fetches := con.client.PollFetches(ctx)
@@ -140,8 +210,22 @@ func (con *Consumer) Run(ctx context.Context) error {
 			return nil
 		}
 
-		if recordCount := fetches.NumRecords(); recordCount > 0 {
-			log.Printf("processor consumed %d record(s) from topic %q", recordCount, con.topic)
+		var reconcileErr error
+		fetches.EachRecord(func(record *kgo.Record) {
+			if reconcileErr != nil {
+				return
+			}
+			txn, err := decodeTransaction(record.Value)
+			if err != nil {
+				log.Printf("processor: skipping undecodable record on topic %q partition %d offset %d: %v", record.Topic, record.Partition, record.Offset, err)
+				return
+			}
+			if err := con.rec.Reconcile(ctx, txn); err != nil {
+				reconcileErr = fmt.Errorf("reconcile transaction event %s: %w", txn.EventID, err)
+			}
+		})
+		if reconcileErr != nil {
+			return reconcileErr
 		}
 	}
 }
