@@ -175,11 +175,11 @@ func FormatAmount(value int64) string {
 // uint64 can hold before it's rescaled back down. The final division
 // truncates toward zero (big.Int.Quo, not rounded), matching AmountScale's
 // existing precision floor of 1e-8 — deliberate, not an oversight.
-func MulAmount(a, b int64) (int64, error) {
-	product := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+func MulAmount(multiplicand, multiplier int64) (int64, error) {
+	product := new(big.Int).Mul(big.NewInt(multiplicand), big.NewInt(multiplier))
 	product.Quo(product, big.NewInt(AmountScale))
 	if !product.IsInt64() {
-		return 0, fmt.Errorf("multiply amount: %d * %d overflows int64 once rescaled", a, b)
+		return 0, fmt.Errorf("multiply amount: %d * %d overflows int64 once rescaled", multiplicand, multiplier)
 	}
 	return product.Int64(), nil
 }
@@ -189,14 +189,14 @@ func MulAmount(a, b int64) (int64, error) {
 // (a*AmountScale)/b). Like MulAmount, it uses math/big because a*AmountScale
 // can exceed int64 before the division brings it back into range, and like
 // MulAmount it truncates toward zero rather than rounding.
-func DivAmount(a, b int64) (int64, error) {
-	if b == 0 {
-		return 0, fmt.Errorf("divide amount: %d / %d: division by zero", a, b)
+func DivAmount(dividend, divisor int64) (int64, error) {
+	if divisor == 0 {
+		return 0, fmt.Errorf("divide amount: %d / %d: division by zero", dividend, divisor)
 	}
-	quotient := new(big.Int).Mul(big.NewInt(a), big.NewInt(AmountScale))
-	quotient.Quo(quotient, big.NewInt(b))
+	quotient := new(big.Int).Mul(big.NewInt(dividend), big.NewInt(AmountScale))
+	quotient.Quo(quotient, big.NewInt(divisor))
 	if !quotient.IsInt64() {
-		return 0, fmt.Errorf("divide amount: %d / %d overflows int64 once rescaled", a, b)
+		return 0, fmt.Errorf("divide amount: %d / %d overflows int64 once rescaled", dividend, divisor)
 	}
 	return quotient.Int64(), nil
 }
