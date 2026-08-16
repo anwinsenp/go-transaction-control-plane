@@ -10,8 +10,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger/storage"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/processor"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/processor/kafka"
@@ -45,10 +48,25 @@ func run() error {
 	}
 	defer pool.Close()
 
-	reconciler := processor.NewReconciler(
-		storage.NewTransactionStore(pool),
-		storage.NewReconciledStateStore(pool),
-	)
+	// Both repository breakers intentionally share one BreakerConfig: they
+	// trip and recover on identical thresholds even though the two
+	// repositories have different failure characteristics, which keeps
+	// config surface area down until there's a concrete reason to split it.
+	breakerConfig, err := breakerConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve circuit breaker config: %w", err)
+	}
+
+	transactions, err := ledger.NewTransactionRepositoryBreaker(storage.NewTransactionStore(pool), breakerConfig)
+	if err != nil {
+		return fmt.Errorf("create transaction repository circuit breaker: %w", err)
+	}
+	reconciledStates, err := ledger.NewReconciledStateRepositoryBreaker(storage.NewReconciledStateStore(pool), breakerConfig)
+	if err != nil {
+		return fmt.Errorf("create reconciled state repository circuit breaker: %w", err)
+	}
+
+	reconciler := processor.NewReconciler(transactions, reconciledStates)
 
 	kafkaConfig, err := kafka.ConfigFromEnv()
 	if err != nil {
@@ -68,4 +86,56 @@ func run() error {
 
 	log.Print("shutdown signal received, processor stopped")
 	return nil
+}
+
+// defaultBreakerFailureThreshold, defaultBreakerOpenTimeout, and
+// defaultBreakerProbeTimeout are the Postgres write path circuit breaker
+// settings applied when PROCESSOR_BREAKER_FAILURE_THRESHOLD /
+// PROCESSOR_BREAKER_OPEN_TIMEOUT / PROCESSOR_BREAKER_PROBE_TIMEOUT are
+// unset.
+const (
+	defaultBreakerFailureThreshold uint32        = 5
+	defaultBreakerOpenTimeout      time.Duration = 30 * time.Second
+	defaultBreakerProbeTimeout     time.Duration = 30 * time.Second
+)
+
+// breakerConfigFromEnv reads the Postgres write path circuit breaker config
+// (shared by the transaction and reconciled state repository breakers) from
+// PROCESSOR_BREAKER_FAILURE_THRESHOLD (positive integer),
+// PROCESSOR_BREAKER_OPEN_TIMEOUT, and PROCESSOR_BREAKER_PROBE_TIMEOUT (any
+// format understood by time.ParseDuration, e.g. "30s"), falling back to
+// defaultBreakerFailureThreshold, defaultBreakerOpenTimeout, and
+// defaultBreakerProbeTimeout when unset.
+func breakerConfigFromEnv() (ledger.BreakerConfig, error) {
+	config := ledger.BreakerConfig{
+		FailureThreshold: defaultBreakerFailureThreshold,
+		OpenTimeout:      defaultBreakerOpenTimeout,
+		ProbeTimeout:     defaultBreakerProbeTimeout,
+	}
+
+	if raw := os.Getenv("PROCESSOR_BREAKER_FAILURE_THRESHOLD"); raw != "" {
+		failureThreshold, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return ledger.BreakerConfig{}, fmt.Errorf("parse PROCESSOR_BREAKER_FAILURE_THRESHOLD: %w", err)
+		}
+		config.FailureThreshold = uint32(failureThreshold)
+	}
+
+	if raw := os.Getenv("PROCESSOR_BREAKER_OPEN_TIMEOUT"); raw != "" {
+		openTimeout, err := time.ParseDuration(raw)
+		if err != nil {
+			return ledger.BreakerConfig{}, fmt.Errorf("parse PROCESSOR_BREAKER_OPEN_TIMEOUT: %w", err)
+		}
+		config.OpenTimeout = openTimeout
+	}
+
+	if raw := os.Getenv("PROCESSOR_BREAKER_PROBE_TIMEOUT"); raw != "" {
+		probeTimeout, err := time.ParseDuration(raw)
+		if err != nil {
+			return ledger.BreakerConfig{}, fmt.Errorf("parse PROCESSOR_BREAKER_PROBE_TIMEOUT: %w", err)
+		}
+		config.ProbeTimeout = probeTimeout
+	}
+
+	return config, nil
 }

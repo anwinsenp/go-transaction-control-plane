@@ -809,9 +809,6 @@ func TestNewConsumerValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewConsumer() error = %v, want nil", err)
 	}
-	if consumer == nil {
-		t.Fatal("NewConsumer() returned nil consumer, want non-nil")
-	}
 	defer consumer.Close()
 
 	if consumer.topic != config.Topic {

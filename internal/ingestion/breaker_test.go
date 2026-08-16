@@ -240,21 +240,18 @@ func TestCircuitBreaker_HalfOpen_RecoverySuccess(t *testing.T) {
 	}
 
 	openedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	breaker.now = func() time.Time { return openedAt }
+	breaker.machine.SetNow(func() time.Time { return openedAt })
 	if publishErr := breaker.Publish(context.Background(), Event{}); !errors.Is(publishErr, errPublishFailed) {
 		t.Fatalf("Publish() error = %v, want %v", publishErr, errPublishFailed)
 	}
 	if state := breaker.State(); state != BreakerOpen {
 		t.Fatalf("state after tripping = %s, want %s", state, BreakerOpen)
 	}
-	breaker.mutex.Lock()
-	consecutiveFailuresOnTrip := breaker.consecutiveFailures
-	breaker.mutex.Unlock()
-	if consecutiveFailuresOnTrip != 0 {
+	if consecutiveFailuresOnTrip := breaker.machine.ConsecutiveFailures(); consecutiveFailuresOnTrip != 0 {
 		t.Errorf("consecutiveFailures after Closed->Open trip = %d, want 0", consecutiveFailuresOnTrip)
 	}
 
-	breaker.now = func() time.Time { return openedAt.Add(config.OpenTimeout) }
+	breaker.machine.SetNow(func() time.Time { return openedAt.Add(config.OpenTimeout) })
 	fake.setErr(nil)
 
 	if publishErr := breaker.Publish(context.Background(), Event{}); publishErr != nil {
@@ -285,13 +282,13 @@ func TestCircuitBreaker_HalfOpen_RecoveryFailure(t *testing.T) {
 	}
 
 	firstOpenedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	breaker.now = func() time.Time { return firstOpenedAt }
+	breaker.machine.SetNow(func() time.Time { return firstOpenedAt })
 	if publishErr := breaker.Publish(context.Background(), Event{}); !errors.Is(publishErr, errPublishFailed) {
 		t.Fatalf("Publish() error = %v, want %v", publishErr, errPublishFailed)
 	}
 
 	probeAt := firstOpenedAt.Add(config.OpenTimeout)
-	breaker.now = func() time.Time { return probeAt }
+	breaker.machine.SetNow(func() time.Time { return probeAt })
 
 	if publishErr := breaker.Publish(context.Background(), Event{}); !errors.Is(publishErr, errPublishFailed) {
 		t.Fatalf("probe Publish() error = %v, want %v", publishErr, errPublishFailed)
@@ -299,23 +296,20 @@ func TestCircuitBreaker_HalfOpen_RecoveryFailure(t *testing.T) {
 	if state := breaker.State(); state != BreakerOpen {
 		t.Fatalf("state after failed probe = %s, want %s", state, BreakerOpen)
 	}
-	breaker.mutex.Lock()
-	consecutiveFailuresOnReopen := breaker.consecutiveFailures
-	breaker.mutex.Unlock()
-	if consecutiveFailuresOnReopen != 0 {
+	if consecutiveFailuresOnReopen := breaker.machine.ConsecutiveFailures(); consecutiveFailuresOnReopen != 0 {
 		t.Errorf("consecutiveFailures after HalfOpen->Open reopen = %d, want 0", consecutiveFailuresOnReopen)
 	}
 
 	// OpenTimeout must have reset from the failed-probe time, not the
 	// original trip time: just after probeAt it should still fail fast.
-	breaker.now = func() time.Time { return probeAt.Add(time.Second) }
+	breaker.machine.SetNow(func() time.Time { return probeAt.Add(time.Second) })
 	if publishErr := breaker.Publish(context.Background(), Event{}); !errors.Is(publishErr, ErrCircuitOpen) {
 		t.Errorf("Publish() error = %v, want %v (timeout should have restarted from the failed probe)", publishErr, ErrCircuitOpen)
 	}
 
 	// Once the new OpenTimeout window (measured from probeAt) has fully
 	// elapsed, a probe should be allowed through again.
-	breaker.now = func() time.Time { return probeAt.Add(config.OpenTimeout) }
+	breaker.machine.SetNow(func() time.Time { return probeAt.Add(config.OpenTimeout) })
 	fake.setErr(nil)
 	if publishErr := breaker.Publish(context.Background(), Event{}); publishErr != nil {
 		t.Errorf("second probe Publish() error = %v, want nil", publishErr)
@@ -344,13 +338,10 @@ func TestCircuitBreaker_HalfOpen_ProbeTimeoutBoundsHungProbe(t *testing.T) {
 	}
 
 	openedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	breaker.now = func() time.Time { return openedAt }
-	breaker.mutex.Lock()
-	breaker.state = BreakerOpen
-	breaker.openedAt = openedAt
-	breaker.mutex.Unlock()
+	breaker.machine.SetNow(func() time.Time { return openedAt })
+	breaker.machine.ForceOpen(openedAt)
 
-	breaker.now = func() time.Time { return openedAt.Add(config.OpenTimeout) }
+	breaker.machine.SetNow(func() time.Time { return openedAt.Add(config.OpenTimeout) })
 
 	probeErrChan := make(chan error, 1)
 	go func() {
@@ -381,12 +372,12 @@ func TestCircuitBreaker_HalfOpen_ConcurrentProbeGate(t *testing.T) {
 
 	openedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	fake.setErr(errPublishFailed)
-	breaker.now = func() time.Time { return openedAt }
+	breaker.machine.SetNow(func() time.Time { return openedAt })
 	if publishErr := breaker.Publish(context.Background(), Event{}); !errors.Is(publishErr, errPublishFailed) {
 		t.Fatalf("Publish() error = %v, want %v", publishErr, errPublishFailed)
 	}
 
-	breaker.now = func() time.Time { return openedAt.Add(config.OpenTimeout) }
+	breaker.machine.SetNow(func() time.Time { return openedAt.Add(config.OpenTimeout) })
 	fake.setErr(nil)
 	// Only wire up the started/block synchronization for the probe call
 	// itself, so the earlier trip call above doesn't consume the buffered
