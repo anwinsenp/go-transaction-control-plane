@@ -47,7 +47,7 @@ deployed to a public sandbox for demonstration.
   silently breaking consumers.
 
 ## Storage layer (`/internal/<domain>/storage`)
-- Postgres/Aurora schema for transactions and reconciled state, with
+- Postgres schema for transactions and reconciled state, with
   indexing appropriate for high-concurrency writes/reads.
 - Repository interfaces defined in the domain package; Postgres
   implementation lives only in `storage/`.
@@ -158,22 +158,24 @@ deployed to a public sandbox for demonstration.
 
 ## Infrastructure (`/terraform`)
 - Modular Terraform: one concern per module (networking, k3s cluster on EC2,
-  Kafka, Postgres/Aurora, ingress).
+  ingress). Kafka and Postgres are not separate managed-AWS-resource
+  Terraform modules — see below.
 - Self-host Kubernetes via k3s on plain EC2 instances (control plane + agent
   nodes) rather than managed EKS/ECS, for cost efficiency. Kind is used for
   local development of the operator against a real API server.
 - Deploy the ingestion layer to the k3s cluster with a public endpoint.
-- Deploy Prometheus + Grafana (or point Grafana at a managed Prometheus) with
-  a public, read-only dashboard link.
+- Deploy Prometheus + Grafana (kube-prometheus-stack) in-cluster with a
+  public, read-only dashboard link.
 - **Use existing operators for undifferentiated infrastructure — do not
-  build custom operators for these.** Kafka: **Strimzi**, if running Kafka
-  in-cluster (otherwise a managed service). TLS: **cert-manager**.
-  Metrics stack: **kube-prometheus-stack**. Postgres: managed (RDS/Aurora)
-  per the original architecture, or a maintained operator (Zalando/PGO) only
-  if running Postgres in-cluster is specifically required. The only
-  custom-built operator in this project is `TradingTenant` — everything
-  else should consume the existing ecosystem, which itself demonstrates
-  knowing when to build vs. when to adopt.
+  build custom operators for these.** Kafka: **Strimzi**, in-cluster. TLS:
+  **cert-manager**. Metrics stack: **kube-prometheus-stack**. Postgres:
+  in-cluster via a maintained operator/chart (e.g. CloudNativePG or
+  Zalando's `postgres-operator`) — see
+  [ADR 0006](docs/decisions/0006-postgres-in-cluster.md), which supersedes
+  the original managed-RDS/Aurora decision. The only custom-built operator
+  in this project is `TradingTenant` — everything else should consume the
+  existing ecosystem, which itself demonstrates knowing when to build vs.
+  when to adopt.
 
 ## Load testing & demo artifacts
 - A load-test script (curl burst or small Go load generator) that fires a

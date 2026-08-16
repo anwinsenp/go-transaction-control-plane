@@ -1,7 +1,8 @@
 # 0002. Build one custom operator, not several
 
 Date: 2026-08-02
-Status: Accepted
+Status: Accepted (Postgres-hosting decision superseded by
+[ADR 0006](0006-postgres-in-cluster.md))
 
 ## Context
 
@@ -20,7 +21,10 @@ Strimzi for Kafka, cert-manager for TLS, kube-prometheus-stack for
 Prometheus. Postgres stays a managed service (RDS/Aurora) per
 [ADR 0001](0001-postgres-over-cassandra.md); an in-cluster Postgres
 operator (Zalando/PGO) is only considered if running Postgres in-cluster
-becomes a specific requirement.
+becomes a specific requirement. **(Superseded: that requirement
+materialized — see [ADR 0006](0006-postgres-in-cluster.md), which moves
+Postgres in-cluster. The rest of this decision — one custom operator,
+existing operators for everything else — still stands.)**
 
 ## Consequences
 

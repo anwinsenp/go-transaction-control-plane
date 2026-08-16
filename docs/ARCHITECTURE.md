@@ -42,7 +42,7 @@ flowchart LR
     client[Public client] -->|gRPC/REST + API key| ingest[Go ingestion service]
     ingest -->|publish event| kafka[(Kafka)]
     kafka --> processor[Go transaction processor]
-    processor -->|reconciled state| postgres[(Postgres / Aurora)]
+    processor -->|reconciled state| postgres[(Postgres, in-cluster)]
     ingest -->|metrics| prom[Prometheus]
     processor -->|metrics: consumer lag, P99| prom
     operator -->|metrics| prom
@@ -68,7 +68,7 @@ flowchart LR
    instead of blocking the consumer. See
    [DESIGN-processor.md](DESIGN-processor.md) for the reconciliation
    algorithm and the DLQ retry/routing mechanics.
-4. Reconciled state is written to Postgres/Aurora through a
+4. Reconciled state is written to Postgres through a
    circuit-breaker-guarded storage layer, with connection pooling sized
    deliberately for the write/read concurrency this service expects.
 5. The processor exports Kafka consumer lag and P99 latency per tenant as
@@ -94,10 +94,14 @@ flowchart LR
   and per-service keyspace isolation. See
   [ADR 0001](decisions/0001-postgres-over-cassandra.md).
 - **One custom operator, not several.** Only tenant-aware scaling/isolation
-  logic (`TradingTenant`) is custom-built; Kafka (Strimzi), TLS
-  (cert-manager), and the metrics stack (kube-prometheus-stack) all use
-  mature existing operators instead of being reimplemented. See
-  [ADR 0002](decisions/0002-single-custom-operator.md).
+  logic (`TradingTenant`) is custom-built; Kafka (Strimzi), Postgres, TLS
+  (cert-manager), and the metrics stack (kube-prometheus-stack) all run
+  in-cluster via mature existing operators/charts instead of being
+  reimplemented. Postgres started out as a managed AWS service (zero
+  in-cluster operational surface) and later moved in-cluster alongside the
+  rest of the stack — see [ADR 0002](decisions/0002-single-custom-operator.md)
+  and its superseding [ADR 0006](decisions/0006-postgres-in-cluster.md) for
+  why.
 - **Self-hosted k3s on EC2 over managed EKS/ECS.** Running k3s (a lightweight
   Kubernetes distro) across plain EC2 instances instead of a managed control
   plane trades operational overhead (patching, upgrades, HA of the control

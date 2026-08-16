@@ -109,9 +109,9 @@ replicas wouldn't fix a slow database.
 2. Check for lock contention or slow queries in the reconciliation write
    path for this tenant's transactions, `pg_stat_activity` and
    `pg_stat_statements` are the usual starting points.
-3. Check Aurora/RDS resource metrics (CPU, IOPS) for the instance during
-   the incident window, for a sign of the instance itself being saturated
-   rather than a single query being the problem.
+3. Check the Postgres pod's resource metrics (CPU, memory, PVC IOPS) in
+   the cluster during the incident window, for a sign of the instance
+   itself being saturated rather than a single query being the problem.
 
 **Action:**
 - Missing index or a slow query plan: add the index or fix the query,

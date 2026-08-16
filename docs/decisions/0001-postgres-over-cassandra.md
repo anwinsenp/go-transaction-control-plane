@@ -13,8 +13,10 @@ or partially-applied transactions) under Kafka's at-least-once delivery.
 
 ## Decision
 
-Use PostgreSQL (Aurora in the AWS deployment) for the transaction ledger
-and reconciled state, not Cassandra.
+Use PostgreSQL for the transaction ledger and reconciled state, not
+Cassandra. (Hosting location — originally managed Aurora, later moved
+in-cluster — is a separate decision; see
+[ADR 0006](0006-postgres-in-cluster.md). Nothing below depends on which.)
 
 ## Consequences
 
@@ -29,10 +31,10 @@ and reconciled state, not Cassandra.
   scale (a single processor service, single ledger schema), that trade-off
   costs nothing; it would matter more at a scale with many independent
   services each needing their own write-scaled keyspace.
-- Ties correctness to a single primary (Aurora writer) rather than a
-  leaderless multi-node write path: acceptable here since the goal is
-  demonstrating financial correctness under realistic load, not proving
-  Cassandra-scale write throughput.
+- Ties correctness to a single primary writer rather than a leaderless
+  multi-node write path: acceptable here since the goal is demonstrating
+  financial correctness under realistic load, not proving Cassandra-scale
+  write throughput.
 
 ## Alternatives considered
 
@@ -47,7 +49,7 @@ and reconciled state, not Cassandra.
   specifically for horizontal write scale while keeping Postgres wire
   compatibility and ACID semantics. This is a credible alternative and
   noted here as a future consideration if/when this system needed to scale
-  writes past what a single Aurora writer can sustain, but it's not
+  writes past what a single Postgres primary can sustain, but it's not
   adopted now: current scale doesn't need it, and introducing it today
   would add operational surface (a different distributed-consensus
   storage engine) without a corresponding requirement to justify it.

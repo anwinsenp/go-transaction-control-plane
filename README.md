@@ -12,9 +12,9 @@ public sandbox for demonstration.
 [Architecture](docs/ARCHITECTURE.md) for the full design. Code is being
 built incrementally against the tracked issues in this repo.
 
-**Stack:** Go · Kafka (Strimzi) · PostgreSQL/Aurora · Kubernetes
-(`controller-runtime`) · Prometheus/Grafana · Terraform · AWS (self-hosted
-k3s on EC2, Kind for local dev)
+**Stack:** Go · Kafka (Strimzi) · PostgreSQL (self-hosted, in-cluster) ·
+Kubernetes (`controller-runtime`) · Prometheus/Grafana · Terraform · AWS
+(self-hosted k3s on EC2, Kind for local dev)
 
 ## Documentation
 

@@ -9,8 +9,8 @@ Status: Accepted
 the ledger's Postgres instance. Left at pgxpool's own defaults (100 max
 conns, no `MaxConnLifetime`/`MaxConnIdleTime` cap), a pool doesn't account
 for how many replicas of the ingestion and processor services run
-concurrently against the same Postgres instance, or for a managed
-database's own connection ceiling. A handful of replicas each opening up
+concurrently against the same Postgres instance, or for that instance's
+own connection ceiling. A handful of replicas each opening up
 to 100 connections can exhaust a modestly-sized instance well before any
 individual service is under real load. Issue #3 asked for pool settings
 that are configurable, documented, and differ sensibly between local dev
@@ -33,8 +33,9 @@ selected by the `APP_ENV` environment variable and overridable per field:
   doesn't need aggressive idle reclamation.
 - **`SandboxPoolConfig()`** — `MaxConns: 20`, `MinConns: 5`,
   `MaxConnLifetime: 30 * time.Minute`, `MaxConnIdleTime: 2 * time.Minute`.
-  The sandbox runs a modestly-sized managed Postgres instance shared by
-  every replica of both the ingestion and processor services. `MaxConns`
+  The sandbox runs a modestly-sized self-hosted, in-cluster Postgres
+  instance (see [ADR 0006](0006-postgres-in-cluster.md)) shared by every
+  replica of both the ingestion and processor services. `MaxConns`
   is kept conservative per-service so a handful of replicas can't
   collectively exhaust the database's own connection ceiling.
   `MaxConnIdleTime` is shorter than local's so idle connections are
@@ -85,7 +86,7 @@ same checks the env path enforces.
 
 - **Single fixed `PoolConfig` for all environments.** Rejected: local dev
   and the sandbox have different connection-ceiling constraints (a
-  single-tenant docker-compose Postgres vs. a shared managed instance),
+  single-tenant docker-compose Postgres vs. a shared in-cluster instance),
   and one set of numbers would either be too small for local iteration or
   too large for the sandbox's shared instance.
 - **Leaving pool sizing at pgxpool's built-in defaults.** Rejected for the
