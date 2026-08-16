@@ -65,7 +65,9 @@ flowchart LR
    P&L-style reconciliation logic idempotently (safe against Kafka's
    at-least-once delivery; duplicates must not double-count). Events that
    fail processing after bounded retries are routed to a dead-letter queue
-   instead of blocking the consumer.
+   instead of blocking the consumer. See
+   [DESIGN-processor.md](DESIGN-processor.md) for the reconciliation
+   algorithm and the DLQ retry/routing mechanics.
 4. Reconciled state is written to Postgres/Aurora through a
    circuit-breaker-guarded storage layer, with connection pooling sized
    deliberately for the write/read concurrency this service expects.
@@ -114,4 +116,5 @@ flowchart LR
 | [DESIGN-operator.md](DESIGN-operator.md) | `TradingTenant` CRD spec and reconcile decision logic |
 | [DESIGN-ingestion.md](DESIGN-ingestion.md) | Ingestion hot-path allocation strategy, gRPC/REST transports, backpressure, circuit breaker |
 | [DESIGN-ledger.md](DESIGN-ledger.md) | Ledger domain types and the fixed-point `int64` amount representation |
+| [DESIGN-processor.md](DESIGN-processor.md) | Idempotent P&L reconciliation algorithm and the Kafka consumer's DLQ retry/routing mechanics |
 | [decisions/](decisions/) | ADR log |

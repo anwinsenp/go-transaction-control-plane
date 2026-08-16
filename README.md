@@ -23,6 +23,7 @@ k3s on EC2, Kind for local dev)
 | [Architecture](docs/ARCHITECTURE.md) | System design, goals/non-goals, major trade-offs |
 | [Ingestion design](docs/DESIGN-ingestion.md) | Zero-allocation hot-path strategy, gRPC/REST transport lifecycle, request validation, backpressure, circuit breaker around Kafka publish |
 | [Ledger design](docs/DESIGN-ledger.md) | `internal/ledger` domain types, fixed-point `int64` amount representation and parsing, Postgres `BIGINT` schema |
+| [Processor design](docs/DESIGN-processor.md) | Idempotent weighted-average-cost P&L reconciliation and the Kafka consumer's bounded-retry dead-letter-queue routing |
 | [Operator design](docs/DESIGN-operator.md) | `TradingTenant` CRD spec and reconcile decision logic |
 | [Operator alerts runbook](docs/RUNBOOK-operator-alerts.md) | Per-alert diagnosis and action steps for scaling, noisy-neighbor isolation, and downstream bottleneck alerts |
 | [Architecture decisions](docs/decisions/) | Log of significant design decisions with rationale |
