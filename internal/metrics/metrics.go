@@ -32,7 +32,12 @@ const counterSuffix = "_total"
 // gaugeHistogramSuffixes are the unit suffixes accepted for gauges and
 // histograms. Counters use counterSuffix instead. This list covers the
 // units used elsewhere in this project (latency, payload size, consumer
-// lag) rather than every possible Prometheus unit.
+// lag) rather than every possible Prometheus unit. It's a read-only lookup
+// table, never mutated after package init, so it's not the mutable global
+// state CLAUDE.md's no-globals rule targets — Go simply has no const slice
+// literal to declare it as instead.
+//
+//nolint:gochecknoglobals // read-only lookup table, see comment above
 var gaugeHistogramSuffixes = []string{"_seconds", "_bytes", "_ratio", "_messages", "_percent"}
 
 // deniedLabels are label names that identify a single entity rather than a
@@ -44,6 +49,11 @@ var gaugeHistogramSuffixes = []string{"_seconds", "_bytes", "_ratio", "_messages
 // This is a denylist of known offenders, not an exhaustive check: spelling
 // variants (txnid, customer_id) or new unbounded identifiers aren't caught.
 // Engineers adding a label are still responsible for keeping it bounded.
+// It's a read-only lookup table, never mutated after package init, so it's
+// not the mutable global state CLAUDE.md's no-globals rule targets — Go
+// simply has no const map literal to declare it as instead.
+//
+//nolint:gochecknoglobals // read-only lookup table, see comment above
 var deniedLabels = map[string]struct{}{
 	"transaction_id": {},
 	"txn_id":         {},
@@ -59,7 +69,13 @@ var deniedLabels = map[string]struct{}{
 
 // LatencyBucketsSeconds are histogram bucket boundaries tuned for hot-path
 // latencies in the microsecond-to-low-millisecond range, expressed in
-// seconds per Prometheus convention.
+// seconds per Prometheus convention. It's a read-only lookup table, never
+// mutated after package init, so it's not the mutable global state
+// CLAUDE.md's no-globals rule targets — callers need a stable value to
+// reference from prometheus.HistogramOpts.Buckets, and Go has no const
+// slice literal to declare it as instead.
+//
+//nolint:gochecknoglobals // read-only lookup table, see comment above
 var LatencyBucketsSeconds = []float64{
 	0.000025, 0.00005, 0.0001, 0.00025, 0.0005,
 	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
