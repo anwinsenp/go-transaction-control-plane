@@ -78,11 +78,21 @@ func run() error {
 		return fmt.Errorf("create publish circuit breaker: %w", err)
 	}
 
-	server, err := api.NewServer(addr, breaker, apiKeys, rateLimit)
+	backpressureConfig, err := backpressureConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve backpressure config: %w", err)
+	}
+
+	limiter, err := ingestion.NewBackpressureLimiter(breaker, backpressureConfig)
+	if err != nil {
+		return fmt.Errorf("create publish backpressure limiter: %w", err)
+	}
+
+	server, err := api.NewServer(addr, limiter, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion HTTP server: %w", err)
 	}
-	grpcServer, err := api.NewGRPCServer(grpcAddr, breaker, apiKeys, rateLimit)
+	grpcServer, err := api.NewGRPCServer(grpcAddr, limiter, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion gRPC server: %w", err)
 	}
@@ -289,6 +299,30 @@ func breakerConfigFromEnv() (ingestion.BreakerConfig, error) {
 			return ingestion.BreakerConfig{}, fmt.Errorf("parse INGESTION_BREAKER_PROBE_TIMEOUT: %w", err)
 		}
 		config.ProbeTimeout = probeTimeout
+	}
+
+	return config, nil
+}
+
+// defaultBackpressureMaxInFlight is the publish backpressure limiter's
+// concurrent in-flight cap applied when INGESTION_BACKPRESSURE_MAX_INFLIGHT
+// is unset.
+const defaultBackpressureMaxInFlight = 256
+
+// backpressureConfigFromEnv reads the publish backpressure limiter's config
+// from INGESTION_BACKPRESSURE_MAX_INFLIGHT (positive integer), falling back
+// to defaultBackpressureMaxInFlight when unset.
+func backpressureConfigFromEnv() (ingestion.BackpressureConfig, error) {
+	config := ingestion.BackpressureConfig{
+		MaxInFlight: defaultBackpressureMaxInFlight,
+	}
+
+	if raw := os.Getenv("INGESTION_BACKPRESSURE_MAX_INFLIGHT"); raw != "" {
+		maxInFlight, err := strconv.Atoi(raw)
+		if err != nil {
+			return ingestion.BackpressureConfig{}, fmt.Errorf("parse INGESTION_BACKPRESSURE_MAX_INFLIGHT: %w", err)
+		}
+		config.MaxInFlight = maxInFlight
 	}
 
 	return config, nil
