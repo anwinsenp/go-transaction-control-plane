@@ -40,7 +40,9 @@ any file.
    green — not `./...`. If the bug was on the hot path, also re-run the
    relevant benchmark to confirm the fix didn't regress allocations/latency.
    A full-module `-race` pass happens once, before shipping, not after every
-   debugging iteration.
+   debugging iteration. Also run `golangci-lint run` scoped to the package(s)
+   you touched and fix any findings — a fix isn't done if it introduces a new
+   lint issue.
 
 Report back: root cause, the fix, and the regression test added. If the bug
 suggests a broader class of issue elsewhere in the codebase (e.g. the same

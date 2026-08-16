@@ -21,10 +21,14 @@ For $ARGUMENTS:
    them, they don't depend on each other's output:
    - `test-writer`, scoped to the package(s) just changed.
    - `code-reviewer`, scoped to the same diff (`git diff`).
-6. Report a combined summary: tests added/coverage delta from
-   `test-writer`, and review findings tagged **[blocking]**/**[nit]** from
-   `code-reviewer`. If anything is blocking or a test fails, propose the
-   fix (use the `debugger` subagent if it's a real bug rather than a
-   missing test) and wait for approval before applying it.
-7. Stop here. This command doesn't run the full-repo gate or commit — once
+6. Once `test-writer` and `code-reviewer` finish, run `golangci-lint run
+   ./...` (scoped to the touched package(s) is fine if the full run is slow)
+   over the combined diff, including the new test file.
+7. Report a combined summary: tests added/coverage delta from
+   `test-writer`; review findings tagged **[blocking]**/**[nit]** from
+   `code-reviewer`; and any `golangci-lint` findings. If anything is
+   blocking, a test fails, or lint fails, propose the fix (use the
+   `debugger` subagent if it's a real bug rather than a missing test or
+   lint nit) and wait for approval before applying it.
+8. Stop here. This command doesn't run the full-repo gate or commit — once
    everything is clean, use `/ship <issue>` or `/commit` next.
