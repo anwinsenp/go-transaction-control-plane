@@ -247,9 +247,6 @@ func TestNewPublisherValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPublisher() error = %v, want nil", err)
 	}
-	if publisher == nil {
-		t.Fatal("NewPublisher() returned nil publisher, want non-nil")
-	}
 	defer publisher.Close()
 
 	if publisher.topic != config.Topic {
