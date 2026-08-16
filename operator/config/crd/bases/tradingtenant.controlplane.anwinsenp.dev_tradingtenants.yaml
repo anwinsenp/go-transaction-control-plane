@@ -1,0 +1,200 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: tradingtenants.tradingtenant.controlplane.anwinsenp.dev
+spec:
+  group: tradingtenant.controlplane.anwinsenp.dev
+  names:
+    kind: TradingTenant
+    listKind: TradingTenantList
+    plural: tradingtenants
+    singular: tradingtenant
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.currentReplicas
+      name: Replicas
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TradingTenant represents one institutional trading client on the
+          platform. See docs/DESIGN-operator.md for the reconcile decision table.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TradingTenantSpec defines the desired state of a TradingTenant.
+            properties:
+              isolation:
+                description: Isolation carries the operator-owned dedicated-node-pool
+                  flag.
+                properties:
+                  dedicatedNodePool:
+                    description: |-
+                      DedicatedNodePool is set to true by the reconciler when the isolation
+                      branch fires (lag high, latency normal, at partition parity). It is
+                      not user-editable: a value supplied at creation time has no effect,
+                      and the reconciler is the sole writer for this field. It is reset to
+                      false only through a deliberate manual operational action, never
+                      automatically by the reconciler, to avoid flapping a tenant on and
+                      off a dedicated node pool whose metrics sit near the threshold.
+                    type: boolean
+                type: object
+              maxReplicas:
+                description: |-
+                  MaxReplicas is the upper bound the scale-up branch must respect.
+                  Must be greater than or equal to MinReplicas.
+                format: int32
+                minimum: 1
+                type: integer
+              minReplicas:
+                description: MinReplicas is the lower bound for status.currentReplicas.
+                format: int32
+                minimum: 1
+                type: integer
+              resources:
+                description: |-
+                  Resources is the per-pod CPU/memory request for this tenant's
+                  processor replicas.
+                properties:
+                  cpuRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      CPURequest is the per-pod CPU request, as a Kubernetes quantity
+                      (e.g. "500m").
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MemoryRequest is the per-pod memory request, as a Kubernetes quantity
+                      (e.g. "512Mi").
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - cpuRequest
+                - memoryRequest
+                type: object
+              scaling:
+                description: |-
+                  Scaling holds the lag/latency thresholds the reconciler classifies
+                  observed signals against.
+                properties:
+                  kafkaLagThreshold:
+                    description: |-
+                      KafkaLagThreshold is the consumer lag (in messages) above which lag
+                      is considered "high" for this tenant.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  p99LatencyThresholdMs:
+                    description: |-
+                      P99LatencyThresholdMs is the processor P99 latency (in milliseconds)
+                      above which latency is considered "high" for this tenant.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - kafkaLagThreshold
+                - p99LatencyThresholdMs
+                type: object
+              tenantID:
+                description: |-
+                  TenantID identifies the institutional client this resource represents.
+                  Immutable after creation.
+                type: string
+                x-kubernetes-validations:
+                - message: tenantID is immutable
+                  rule: self == oldSelf
+            required:
+            - maxReplicas
+            - minReplicas
+            - resources
+            - scaling
+            - tenantID
+            type: object
+            x-kubernetes-validations:
+            - message: maxReplicas must be greater than or equal to minReplicas
+              rule: self.maxReplicas >= self.minReplicas
+          status:
+            description: |-
+              TradingTenantStatus defines the observed state of a TradingTenant, as
+              populated by the reconciler on each pass.
+            properties:
+              currentReplicas:
+                description: CurrentReplicas is the last replica count set by the
+                  reconciler.
+                format: int32
+                type: integer
+              lastReconcileTime:
+                description: |-
+                  LastReconcileTime is the timestamp of the most recent reconcile
+                  pass, updated every pass regardless of whether action was taken.
+                format: date-time
+                type: string
+              observedKafkaLag:
+                description: |-
+                  ObservedKafkaLag is the most recently observed consumer lag (in
+                  messages) for this tenant's partitions, as scraped from Prometheus.
+                format: int64
+                type: integer
+              observedP99Ms:
+                description: |-
+                  ObservedP99Ms is the most recently observed processor P99 latency
+                  (in milliseconds) for this tenant, as scraped from Prometheus.
+                format: int32
+                type: integer
+              observedPartitionCount:
+                description: |-
+                  ObservedPartitionCount is the tenant's Kafka topic partition count,
+                  most recently observed. Used against CurrentReplicas to determine
+                  whether there is still Kafka-side parallelism headroom before
+                  falling back to isolation.
+                format: int32
+                type: integer
+              state:
+                description: |-
+                  State is the reconciler's most recent classification for this
+                  tenant. See the decision table in docs/DESIGN-operator.md.
+                enum:
+                - Stable
+                - Scaling
+                - Isolated
+                - Degraded
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
