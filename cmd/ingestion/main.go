@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"google.golang.org/grpc"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
@@ -88,11 +90,22 @@ func run() error {
 		return fmt.Errorf("create publish backpressure limiter: %w", err)
 	}
 
-	server, err := api.NewServer(addr, limiter, apiKeys, rateLimit)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	ingestionMetrics, err := ingestion.NewMetrics(registry)
+	if err != nil {
+		return fmt.Errorf("create ingestion metrics: %w", err)
+	}
+	instrumentedPublisher, err := ingestion.NewInstrumentedPublisher(limiter, ingestionMetrics, breaker)
+	if err != nil {
+		return fmt.Errorf("create instrumented publisher: %w", err)
+	}
+
+	server, err := api.NewServer(addr, instrumentedPublisher, apiKeys, rateLimit, registry)
 	if err != nil {
 		return fmt.Errorf("create ingestion HTTP server: %w", err)
 	}
-	grpcServer, err := api.NewGRPCServer(grpcAddr, limiter, apiKeys, rateLimit)
+	grpcServer, err := api.NewGRPCServer(grpcAddr, instrumentedPublisher, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion gRPC server: %w", err)
 	}

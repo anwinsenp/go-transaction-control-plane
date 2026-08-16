@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 )
@@ -34,7 +37,7 @@ func closeBody(t *testing.T, response *http.Response) {
 // test if construction fails.
 func newTestServer(t *testing.T, addr string, publisher ingestion.Publisher) *Server {
 	t.Helper()
-	server, err := NewServer(addr, publisher, []string{testHTTPAPIKey}, testRateLimitConfig)
+	server, err := NewServer(addr, publisher, []string{testHTTPAPIKey}, testRateLimitConfig, prometheus.NewRegistry())
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -58,7 +61,7 @@ func TestNewServerRejectsInvalidAPIKeys(t *testing.T) {
 
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			server, err := NewServer("127.0.0.1:0", &fakePublisher{}, testCase.apiKeys, testRateLimitConfig)
+			server, err := NewServer("127.0.0.1:0", &fakePublisher{}, testCase.apiKeys, testRateLimitConfig, prometheus.NewRegistry())
 			if err == nil {
 				t.Fatalf("NewServer(%v) error = nil, want error", testCase.apiKeys)
 			}
@@ -263,7 +266,7 @@ func TestServerHealthzDoesNotRequireAuth(t *testing.T) {
 }
 
 func TestServerRejectsTransactionsOverRateLimit(t *testing.T) {
-	server, err := NewServer("127.0.0.1:0", &fakePublisher{}, []string{testHTTPAPIKey}, RateLimitConfig{RequestsPerSecond: 1, Burst: 1})
+	server, err := NewServer("127.0.0.1:0", &fakePublisher{}, []string{testHTTPAPIKey}, RateLimitConfig{RequestsPerSecond: 1, Burst: 1}, prometheus.NewRegistry())
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -315,6 +318,47 @@ func TestServerRejectsTransactionsOverRateLimit(t *testing.T) {
 	}
 	if errResponse.Error == "" {
 		t.Error("error message is empty, want a clear description")
+	}
+}
+
+// TestServerMetricsEndpointDoesNotRequireAuthAndServesGatherer confirms
+// /metrics is reachable without an Authorization header and serves whatever
+// gatherer was passed into NewServer, mirroring how
+// TestServerHealthzDoesNotRequireAuth exercises /healthz.
+func TestServerMetricsEndpointDoesNotRequireAuthAndServesGatherer(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	if _, err := ingestion.NewMetrics(registry); err != nil {
+		t.Fatalf("ingestion.NewMetrics() unexpected error: %v", err)
+	}
+
+	server, err := NewServer("127.0.0.1:0", &fakePublisher{}, []string{testHTTPAPIKey}, testRateLimitConfig, registry)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	testServer := httptest.NewServer(server.httpServer.Handler)
+	defer testServer.Close()
+
+	request, err := http.NewRequest(http.MethodGet, testServer.URL+"/metrics", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	response, err := testServer.Client().Do(request)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer closeBody(t, response)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading response body: %v", err)
+	}
+	if !strings.Contains(string(body), "ingestion_transactions_processed_total") {
+		t.Errorf("/metrics response body does not contain the registered gatherer's metric; got: %s", body)
 	}
 }
 
