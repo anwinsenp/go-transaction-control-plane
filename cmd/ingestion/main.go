@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion/kafka"
 )
 
@@ -67,11 +68,21 @@ func run() error {
 	}
 	defer publisher.Close()
 
-	server, err := api.NewServer(addr, publisher, apiKeys, rateLimit)
+	breakerConfig, err := breakerConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("resolve circuit breaker config: %w", err)
+	}
+
+	breaker, err := ingestion.NewCircuitBreaker(publisher, breakerConfig)
+	if err != nil {
+		return fmt.Errorf("create publish circuit breaker: %w", err)
+	}
+
+	server, err := api.NewServer(addr, breaker, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion HTTP server: %w", err)
 	}
-	grpcServer, err := api.NewGRPCServer(grpcAddr, publisher, apiKeys, rateLimit)
+	grpcServer, err := api.NewGRPCServer(grpcAddr, breaker, apiKeys, rateLimit)
 	if err != nil {
 		return fmt.Errorf("create ingestion gRPC server: %w", err)
 	}
@@ -227,6 +238,57 @@ func rateLimitConfigFromEnv() (api.RateLimitConfig, error) {
 			return api.RateLimitConfig{}, fmt.Errorf("parse INGESTION_RATE_LIMIT_BURST: %w", err)
 		}
 		config.Burst = burst
+	}
+
+	return config, nil
+}
+
+// defaultBreakerFailureThreshold, defaultBreakerOpenTimeout, and
+// defaultBreakerProbeTimeout are the publish circuit breaker settings
+// applied when INGESTION_BREAKER_FAILURE_THRESHOLD /
+// INGESTION_BREAKER_OPEN_TIMEOUT / INGESTION_BREAKER_PROBE_TIMEOUT are
+// unset.
+const (
+	defaultBreakerFailureThreshold uint32        = 5
+	defaultBreakerOpenTimeout      time.Duration = 30 * time.Second
+	defaultBreakerProbeTimeout     time.Duration = 30 * time.Second
+)
+
+// breakerConfigFromEnv reads the publish circuit breaker config from
+// INGESTION_BREAKER_FAILURE_THRESHOLD (positive integer),
+// INGESTION_BREAKER_OPEN_TIMEOUT, and INGESTION_BREAKER_PROBE_TIMEOUT (any
+// format understood by time.ParseDuration, e.g. "30s"), falling back to
+// defaultBreakerFailureThreshold, defaultBreakerOpenTimeout, and
+// defaultBreakerProbeTimeout when unset.
+func breakerConfigFromEnv() (ingestion.BreakerConfig, error) {
+	config := ingestion.BreakerConfig{
+		FailureThreshold: defaultBreakerFailureThreshold,
+		OpenTimeout:      defaultBreakerOpenTimeout,
+		ProbeTimeout:     defaultBreakerProbeTimeout,
+	}
+
+	if raw := os.Getenv("INGESTION_BREAKER_FAILURE_THRESHOLD"); raw != "" {
+		failureThreshold, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return ingestion.BreakerConfig{}, fmt.Errorf("parse INGESTION_BREAKER_FAILURE_THRESHOLD: %w", err)
+		}
+		config.FailureThreshold = uint32(failureThreshold)
+	}
+
+	if raw := os.Getenv("INGESTION_BREAKER_OPEN_TIMEOUT"); raw != "" {
+		openTimeout, err := time.ParseDuration(raw)
+		if err != nil {
+			return ingestion.BreakerConfig{}, fmt.Errorf("parse INGESTION_BREAKER_OPEN_TIMEOUT: %w", err)
+		}
+		config.OpenTimeout = openTimeout
+	}
+
+	if raw := os.Getenv("INGESTION_BREAKER_PROBE_TIMEOUT"); raw != "" {
+		probeTimeout, err := time.ParseDuration(raw)
+		if err != nil {
+			return ingestion.BreakerConfig{}, fmt.Errorf("parse INGESTION_BREAKER_PROBE_TIMEOUT: %w", err)
+		}
+		config.ProbeTimeout = probeTimeout
 	}
 
 	return config, nil
