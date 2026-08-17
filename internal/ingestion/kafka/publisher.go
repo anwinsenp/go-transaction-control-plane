@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
@@ -40,6 +41,16 @@ type Config struct {
 	// any pending linger and drains immediately once called, so this only
 	// helps when multiple publishes are in flight concurrently.
 	Linger time.Duration
+	// TenantPartitions reserves a fixed, exclusive block of partitions for
+	// specific tenants (e.g. ones the operator has flagged noisy/isolated
+	// per ADR 0007), instead of the DefaultPartitionsPerTenant every other
+	// tenant gets. Values must be >= 1. Nil/empty means every tenant uses
+	// the default.
+	TenantPartitions TenantPartitionConfig
+	// DefaultPartitionsPerTenant is how many partitions a tenant not
+	// listed in TenantPartitions is confined to. Zero defaults to
+	// DefaultPartitionsPerTenant (1) in NewPublisher.
+	DefaultPartitionsPerTenant int32
 }
 
 // LocalConfig returns producer settings sized for the docker-compose local
@@ -98,6 +109,17 @@ func (cfg Config) validate() error {
 	if cfg.Linger < 0 {
 		return fmt.Errorf("%w: Linger %s must not be negative", ErrInvalidConfig, cfg.Linger)
 	}
+	if cfg.DefaultPartitionsPerTenant < 0 {
+		return fmt.Errorf("%w: DefaultPartitionsPerTenant %d must not be negative", ErrInvalidConfig, cfg.DefaultPartitionsPerTenant)
+	}
+	for tenantID, size := range cfg.TenantPartitions {
+		if strings.TrimSpace(tenantID) == "" {
+			return fmt.Errorf("%w: TenantPartitions key must not be blank", ErrInvalidConfig)
+		}
+		if size < 1 {
+			return fmt.Errorf("%w: TenantPartitions[%q] = %d must be >= 1", ErrInvalidConfig, tenantID, size)
+		}
+	}
 	return nil
 }
 
@@ -130,15 +152,30 @@ type Publisher struct {
 
 var _ ingestion.Publisher = (*Publisher)(nil)
 
-// NewPublisher builds a Publisher connected to the brokers in cfg.
-// Durability is set to wait for acknowledgment from all in-sync replicas
-// (RequiredAcks(AllISRAcks())) rather than just the partition leader — a
-// transaction event lost after a leader crash but before ISR replication
-// would silently vanish from the ledger, which this service's correctness
-// goals don't allow trading away for lower publish latency.
-func NewPublisher(cfg Config) (*Publisher, error) {
+// NewPublisher builds a Publisher connected to the brokers in cfg,
+// reporting the tenant partition reservation table's metrics (see
+// NewMetrics) on reg. Durability is set to wait for acknowledgment from
+// all in-sync replicas (RequiredAcks(AllISRAcks())) rather than just the
+// partition leader — a transaction event lost after a leader crash but
+// before ISR replication would silently vanish from the ledger, which this
+// service's correctness goals don't allow trading away for lower publish
+// latency.
+func NewPublisher(cfg Config, reg prometheus.Registerer) (*Publisher, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("new kafka publisher: %w", err)
+	}
+	if reg == nil {
+		return nil, fmt.Errorf("new kafka publisher: reg must not be nil")
+	}
+
+	kafkaMetrics, err := NewMetrics(reg)
+	if err != nil {
+		return nil, fmt.Errorf("new kafka publisher: %w", err)
+	}
+
+	defaultPartitions := cfg.DefaultPartitionsPerTenant
+	if defaultPartitions == 0 {
+		defaultPartitions = DefaultPartitionsPerTenant
 	}
 
 	client, err := kgo.NewClient(
@@ -148,6 +185,7 @@ func NewPublisher(cfg Config) (*Publisher, error) {
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProduceRequestTimeout(cfg.RequestTimeout),
 		kgo.ProducerLinger(cfg.Linger),
+		kgo.RecordPartitioner(newTenantPartitioner(cfg.TenantPartitions, defaultPartitions, kafkaMetrics)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new kafka publisher: create client: %w", err)
@@ -172,14 +210,17 @@ type wireEvent struct {
 	OccurredAt    string `json:"occurred_at"`
 }
 
-// partitionKey returns the Kafka partition key for an event: tenant and
-// instrument together, so every event for a given tenant's instrument lands
-// on the same partition and is observed by the processor in publish order,
-// which idempotent P&L reconciliation depends on. The two components are
-// joined without escaping, so this relies on internal/api's validation
-// charsets (tenant_id: lowercase alphanumeric/hyphen; instrument: uppercase
-// alphanumeric/dot) never allowing ':' — if that constraint changes, this
-// key could collide across tenant/instrument boundaries.
+// partitionKey returns the Kafka record key for an event: tenant and
+// instrument together. tenantPartitioner (the client's RecordPartitioner)
+// parses this key back into its two components to pick a partition within
+// the tenant's reserved range, so every event for a given tenant's
+// instrument lands on the same partition and is observed by the processor
+// in publish order, which idempotent P&L reconciliation depends on. The
+// two components are joined without escaping, so this relies on
+// internal/api's validation charsets (tenant_id: lowercase
+// alphanumeric/hyphen; instrument: uppercase alphanumeric/dot) never
+// allowing ':' — if that constraint changes, this key could collide across
+// tenant/instrument boundaries.
 func partitionKey(tenantID, instrument string) string {
 	return tenantID + ":" + instrument
 }

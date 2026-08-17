@@ -64,7 +64,10 @@ func run() error {
 		return fmt.Errorf("resolve kafka config: %w", err)
 	}
 
-	publisher, err := kafka.NewPublisher(kafkaConfig)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+
+	publisher, err := kafka.NewPublisher(kafkaConfig, registry)
 	if err != nil {
 		return fmt.Errorf("create kafka publisher: %w", err)
 	}
@@ -90,8 +93,6 @@ func run() error {
 		return fmt.Errorf("create publish backpressure limiter: %w", err)
 	}
 
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	ingestionMetrics, err := ingestion.NewMetrics(registry)
 	if err != nil {
 		return fmt.Errorf("create ingestion metrics: %w", err)

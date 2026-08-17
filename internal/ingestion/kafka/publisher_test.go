@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
@@ -214,6 +215,18 @@ func TestConfigValidate(t *testing.T) {
 			name:   "negative linger",
 			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", RequestTimeout: time.Second, Linger: -time.Millisecond},
 		},
+		{
+			name:   "negative default partitions per tenant",
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", RequestTimeout: time.Second, DefaultPartitionsPerTenant: -1},
+		},
+		{
+			name:   "blank tenant partitions key",
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", RequestTimeout: time.Second, TenantPartitions: TenantPartitionConfig{" ": 2}},
+		},
+		{
+			name:   "tenant partitions value below one",
+			config: Config{Brokers: []string{"localhost:9092"}, Topic: "t", RequestTimeout: time.Second, TenantPartitions: TenantPartitionConfig{"tenant-a": 0}},
+		},
 	}
 
 	for _, testCase := range tests {
@@ -225,9 +238,40 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+// TestConfigValidateValidTenantPartitions ensures a Config with a populated
+// TenantPartitions map and a positive DefaultPartitionsPerTenant passes
+// validation, so TestConfigValidate's failure-only table above doesn't
+// leave the accepting path unverified.
+func TestConfigValidateValidTenantPartitions(t *testing.T) {
+	config := Config{
+		Brokers:                    []string{"localhost:9092"},
+		Topic:                      "t",
+		RequestTimeout:             time.Second,
+		TenantPartitions:           TenantPartitionConfig{"tenant-a": 2, "tenant-b": 1},
+		DefaultPartitionsPerTenant: 3,
+	}
+
+	if err := config.validate(); err != nil {
+		t.Errorf("validate() error = %v, want nil", err)
+	}
+}
+
 func TestNewPublisherRejectsInvalidConfig(t *testing.T) {
-	if _, err := NewPublisher(Config{}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := NewPublisher(Config{}, prometheus.NewRegistry()); !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("NewPublisher() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+func TestNewPublisherRejectsNilRegisterer(t *testing.T) {
+	config := Config{
+		Brokers:        []string{"127.0.0.1:9"},
+		Topic:          "transaction-events",
+		RequestTimeout: time.Second,
+		Linger:         time.Millisecond,
+	}
+
+	if _, err := NewPublisher(config, nil); err == nil {
+		t.Error("NewPublisher() error = nil, want error for nil Registerer")
 	}
 }
 
@@ -243,7 +287,7 @@ func TestNewPublisherValidConfig(t *testing.T) {
 		Linger:         time.Millisecond,
 	}
 
-	publisher, err := NewPublisher(config)
+	publisher, err := NewPublisher(config, prometheus.NewRegistry())
 	if err != nil {
 		t.Fatalf("NewPublisher() error = %v, want nil", err)
 	}
