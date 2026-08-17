@@ -107,6 +107,11 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	decision := classify(tenant.Spec, baseline, tenant.Spec.Isolation.DedicatedNodePool, lag, p99Ms, partitionCount)
 
+	// isolation.dedicatedNodePool is the only field this reconciler writes
+	// to spec rather than status: it's a durable placement decision (#20)
+	// that node-pool provisioning depends on, not an ephemeral observed
+	// signal, so it must persist as a normal spec field rather than being
+	// freely overwritten like status is on every pass.
 	if decision.setDedicatedNodePool && !tenant.Spec.Isolation.DedicatedNodePool {
 		tenant.Spec.Isolation.DedicatedNodePool = true
 		if err := r.Update(reconcileCtx, &tenant); err != nil {

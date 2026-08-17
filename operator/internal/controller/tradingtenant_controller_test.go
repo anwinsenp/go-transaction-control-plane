@@ -283,6 +283,49 @@ func TestReconcile_IsIdempotent(t *testing.T) {
 	}
 }
 
+func TestReconcile_StatusOnlyReconcileDoesNotMutateSpec(t *testing.T) {
+	tenant := newTestTenant()
+	// Start below MinReplicas so the stable branch's baseline clamp forces
+	// status.currentReplicas to visibly change. Without this, the stable
+	// branch would leave CurrentReplicas untouched and this test could pass
+	// even if status writes were broken entirely.
+	tenant.Status.CurrentReplicas = 0
+	wantSpec := tenant.Spec.DeepCopy()
+	beforeStatus := tenant.Status.DeepCopy()
+
+	// lag and latency both normal: the stable branch, which never sets
+	// setDedicatedNodePool, so this pass should touch status only.
+	observer := &fakeObserver{lag: 100, p99Ms: 10, partitionCount: 12}
+	reconciler, fakeClient := newReconciler(t, tenant, observer)
+	request := reconcileRequest(tenant)
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	var got tradingv1alpha1.TradingTenant
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &got); err != nil {
+		t.Fatalf("Get after Reconcile: %v", err)
+	}
+
+	if !reflect.DeepEqual(got.Spec, *wantSpec) {
+		t.Errorf("spec changed on a status-only reconcile:\nbefore: %+v\nafter:  %+v", *wantSpec, got.Spec)
+	}
+
+	// Prove this is genuinely a "status updated, spec untouched" test rather
+	// than a "nothing happened" test: status must actually have changed in
+	// this same pass.
+	if reflect.DeepEqual(got.Status, *beforeStatus) {
+		t.Fatal("status did not change on reconcile; this test would not catch a broken status write")
+	}
+	if got.Status.CurrentReplicas != tenant.Spec.MinReplicas {
+		t.Errorf("status.currentReplicas = %d, want %d (baseline clamped to MinReplicas)", got.Status.CurrentReplicas, tenant.Spec.MinReplicas)
+	}
+	if got.Status.State != tradingv1alpha1.TradingTenantStateStable {
+		t.Errorf("status.state = %q, want %q", got.Status.State, tradingv1alpha1.TradingTenantStateStable)
+	}
+}
+
 func TestReconcile_IsolationNeverAutoReverts(t *testing.T) {
 	tenant := newTestTenant()
 	tenant.Spec.Isolation.DedicatedNodePool = true
@@ -306,5 +349,46 @@ func TestReconcile_IsolationNeverAutoReverts(t *testing.T) {
 	}
 	if !got.Spec.Isolation.DedicatedNodePool {
 		t.Error("spec.isolation.dedicatedNodePool flipped back to false, want it to remain true")
+	}
+}
+
+// TestReconcile_IsolationGuardSkipsRedundantSpecUpdateWhenAlreadyIsolated
+// covers the !tenant.Spec.Isolation.DedicatedNodePool guard in Reconcile: when
+// the tenant is already isolated and the observed signals repeat the isolate
+// trigger, the spec Update must be skipped (a no-op, since the field is
+// already true) while status writes still proceed normally.
+func TestReconcile_IsolationGuardSkipsRedundantSpecUpdateWhenAlreadyIsolated(t *testing.T) {
+	tenant := newTestTenant()
+	tenant.Spec.Isolation.DedicatedNodePool = true
+	tenant.Status.State = tradingv1alpha1.TradingTenantStateIsolated
+
+	// lag high, latency normal, partition parity: the same isolate trigger
+	// as TestReconcile_DecisionTableBranches's isolate case, so
+	// decision.setDedicatedNodePool is true even though the field is
+	// already set.
+	observer := &fakeObserver{lag: 2000, p99Ms: 10, partitionCount: 3}
+	reconciler, fakeClient := newReconciler(t, tenant, observer)
+	request := reconcileRequest(tenant)
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	var got tradingv1alpha1.TradingTenant
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &got); err != nil {
+		t.Fatalf("Get after Reconcile: %v", err)
+	}
+
+	if !got.Spec.Isolation.DedicatedNodePool {
+		t.Error("spec.isolation.dedicatedNodePool = false, want it to remain true")
+	}
+	if got.Status.State != tradingv1alpha1.TradingTenantStateIsolated {
+		t.Errorf("status.state = %q, want %q", got.Status.State, tradingv1alpha1.TradingTenantStateIsolated)
+	}
+	if got.Status.CurrentReplicas != 3 {
+		t.Errorf("status.currentReplicas = %d, want 3", got.Status.CurrentReplicas)
+	}
+	if got.Status.LastReconcileTime.IsZero() {
+		t.Error("status.lastReconcileTime was not set; status writes should still happen even when the spec write is skipped")
 	}
 }
