@@ -90,7 +90,7 @@ on whether the tenant still has unused Kafka-side parallelism
 |---|---|---|---|---|---|
 | High | High | — | Genuine under-capacity | Scale up `currentReplicas`, bounded by `maxReplicas` | `Scaling` |
 | High | Normal | `currentReplicas < observedPartitionCount` | Backlog building but still Kafka-side headroom to add consumers | Scale up `currentReplicas` first, bounded by `maxReplicas` and `observedPartitionCount` | `Scaling` |
-| High | Normal | `currentReplicas >= observedPartitionCount` | At partition parity already; noisy-neighbor / partition-skew, not a capacity problem | Set `isolation.dedicatedNodePool: true`; do not change replica count; flag for manual review of the tenant's partitioning key | `Isolated` |
+| High | Normal | `currentReplicas >= observedPartitionCount` | At partition parity already; noisy-neighbor / partition-skew, not a capacity problem | Set `isolation.dedicatedNodePool: true`; do not change replica count; reconciler provisions a dedicated ingestion/processor Deployment and routes the tenant to it (see [ADR 0007](decisions/0007-automated-tenant-isolation.md)) | `Isolated` |
 | Normal | High | — | Likely a downstream (Postgres) bottleneck that more replicas won't fix | No scaling action; surface for investigation | `Degraded` |
 | Normal | Normal | — | Healthy | No action | `Stable` |
 
@@ -187,6 +187,22 @@ to one must be reflected in the other.
 - Errors returned from `Reconcile` are returned to the controller-runtime
   caller for standard requeue/backoff handling: the reconciler never
   sleeps-and-retries internally.
+
+## Dedicated pool provisioning and event emission
+
+When the isolation branch fires, the reconciler does more than set the
+spec flag: it get-or-creates a dedicated ingestion + processor Deployment
+(with `nodeSelector`/`tolerations` for an isolated node pool), a Service
+scoped to that Deployment's pods, and a ConfigMap carrying the tenant's
+reserved Kafka partition set, which the dedicated processor consumes via
+manual partition assignment rather than consumer-group subscription. Every
+side effect here follows the same get-or-create idempotency pattern as the
+rest of `Reconcile`. State transitions (`TenantIsolated`,
+`DedicatedPoolCreated`, etc.) emit `record.EventRecorder` Kubernetes Events
+and increment a low-cardinality
+`tradingtenant_isolation_transitions_total{state=...}` counter. Full
+rationale, the partition reservation scheme, and the ingress-routing
+prerequisite are in [ADR 0007](decisions/0007-automated-tenant-isolation.md).
 
 ## Testing approach
 

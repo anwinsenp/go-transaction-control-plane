@@ -180,15 +180,19 @@ implementation, built on
   partition leader. A transaction event is part of the ledger's source of
   truth, so losing one to a leader crash before ISR replication is not an
   acceptable trade for lower publish latency.
-- **Partitioning:** the Kafka message key is `<tenant_id>:<instrument>`, so
-  every event for a given tenant's instrument lands on the same partition
-  and is observed by the processor in publish order — idempotent P&L
-  reconciliation depends on seeing an instrument's events in order. The two
-  components are joined without escaping (`tenantID + ":" + instrument`),
-  which is safe only because `internal/api`'s validation charsets forbid
-  `:` in both fields (tenant_id: lowercase alphanumeric/hyphen; instrument:
-  uppercase alphanumeric/dot). If either charset is ever relaxed to allow
-  `:`, this key could collide across tenant/instrument boundaries.
+- **Partitioning:** each tenant is assigned a fixed, reserved subset of the
+  topic's partitions via an explicit `tenantID -> []partition` mapping
+  (rather than a hash of the combined key), maintained by the
+  `TradingTenant` operator and hot-reloaded by the publisher at runtime.
+  `instrument` is then hashed only within that tenant's reserved subset to
+  pick the specific partition, so every event for a given tenant's
+  instrument still lands on the same partition and is observed by the
+  processor in publish order — idempotent P&L reconciliation depends on
+  seeing an instrument's events in order. Reserving partitions per tenant
+  additionally guarantees no two tenants can ever collide on the same
+  partition, which the plain `tenantID:instrument` hash could not
+  guarantee. See [ADR 0007](decisions/0007-automated-tenant-isolation.md)
+  for the full isolation design this partitioning scheme supports.
 - **Batching/latency:** `ProducerLinger` batches concurrently in-flight
   produces into fewer requests. The publish call itself is synchronous
   (`ProduceSync`), which cancels any pending linger and drains immediately,

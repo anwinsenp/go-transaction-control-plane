@@ -48,6 +48,9 @@ flowchart LR
     operator -->|metrics| prom
     prom -->|PromQL query: lag + P99| operator[Custom K8s Operator\nTradingTenant]
     prom --> grafana[Grafana dashboards + alerts]
+    operator -->|get-or-create| dedicated[Dedicated ingestion + processor\nfor isolated tenant]
+    client -.->|isolated tenant traffic| ingress[Ingress / Gateway routing]
+    ingress -.-> dedicated
 ```
 
 ## Data flow
@@ -77,9 +80,12 @@ flowchart LR
    queries Prometheus for these same two signals (plus partition count) on
    each reconcile pass and reconciles each `TradingTenant` resource:
    scaling replicas whenever there's still Kafka-side headroom to do so,
-   falling back to isolating a tenant onto a dedicated node pool only once
-   it's out of that headroom, or flagging a downstream bottleneck as
-   `Degraded`, depending on which signals are elevated. See
+   falling back to isolating a tenant only once it's out of that headroom,
+   or flagging a downstream bottleneck as `Degraded`, depending on which
+   signals are elevated. Isolation now provisions a dedicated
+   ingestion/processor pair for that tenant and routes its traffic there
+   via an ingress/gateway rule, not just a spec flag (see
+   [ADR 0007](decisions/0007-automated-tenant-isolation.md)). See
    [DESIGN-operator.md](DESIGN-operator.md) for the full decision table and
    the Prometheus query path.
 6. All three services (ingestion, processor, operator) export Prometheus
