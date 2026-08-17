@@ -51,6 +51,11 @@ type TradingTenantReconciler struct {
 	// RequeueInterval is the steady-state delay before the next reconcile
 	// pass. Defaults to 30 seconds if unset.
 	RequeueInterval time.Duration
+
+	// Metrics reports reconcile loop duration. Optional: nil skips
+	// recording, so tests and callers that don't need metrics can leave it
+	// unset.
+	Metrics *Metrics
 }
 
 // reconcileDecision is the outcome of classifying one tenant's observed
@@ -68,7 +73,19 @@ type reconcileDecision struct {
 // table from docs/DESIGN-operator.md. It is idempotent: given the same
 // TradingTenant object state and the same observed signals, it computes
 // the same status every time it runs.
-func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (reconcileResult ctrl.Result, reconcileErr error) {
+	start := time.Now()
+	defer func() {
+		if r.Metrics == nil {
+			return
+		}
+		outcome := resultSuccess
+		if reconcileErr != nil {
+			outcome = resultError
+		}
+		r.Metrics.observeDuration(outcome, time.Since(start).Seconds())
+	}()
+
 	reconcileTimeout := r.ReconcileTimeout
 	if reconcileTimeout <= 0 {
 		reconcileTimeout = 5 * time.Second
@@ -78,6 +95,11 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	var tenant tradingv1alpha1.TradingTenant
 	if err := r.Get(reconcileCtx, req.NamespacedName, &tenant); err != nil {
+		// client.IgnoreNotFound deliberately returns nil for a NotFound
+		// error (object deleted mid-reconcile), so the defer above records
+		// this pass under result=success alongside true successful
+		// reconciles rather than a distinct outcome. This is intentional:
+		// don't introduce a third "result" label value for it.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 

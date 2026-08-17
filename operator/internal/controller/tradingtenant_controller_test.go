@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -390,5 +391,53 @@ func TestReconcile_IsolationGuardSkipsRedundantSpecUpdateWhenAlreadyIsolated(t *
 	}
 	if got.Status.LastReconcileTime.IsZero() {
 		t.Error("status.lastReconcileTime was not set; status writes should still happen even when the spec write is skipped")
+	}
+}
+
+func TestReconcile_RecordsSuccessMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+
+	tenant := newTestTenant()
+	observer := &fakeObserver{lag: 100, p99Ms: 10, partitionCount: 12}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcileRequest(tenant)); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	if gotSuccess := sampleCountForLabel(t, registry, resultSuccess); gotSuccess != 1 {
+		t.Errorf("success bucket sample count = %v, want 1", gotSuccess)
+	}
+	if gotError := sampleCountForLabel(t, registry, resultError); gotError != 0 {
+		t.Errorf("error bucket sample count = %v, want 0", gotError)
+	}
+}
+
+func TestReconcile_RecordsErrorMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+
+	tenant := newTestTenant()
+	observer := &fakeObserver{err: errors.New("prometheus unreachable")}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcileRequest(tenant)); err == nil {
+		t.Fatal("Reconcile returned nil error, want the observer error surfaced")
+	}
+
+	if gotError := sampleCountForLabel(t, registry, resultError); gotError != 1 {
+		t.Errorf("error bucket sample count = %v, want 1", gotError)
+	}
+	if gotSuccess := sampleCountForLabel(t, registry, resultSuccess); gotSuccess != 0 {
+		t.Errorf("success bucket sample count = %v, want 0", gotSuccess)
 	}
 }
