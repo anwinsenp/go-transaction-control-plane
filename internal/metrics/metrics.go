@@ -32,13 +32,14 @@ const counterSuffix = "_total"
 // gaugeHistogramSuffixes are the unit suffixes accepted for gauges and
 // histograms. Counters use counterSuffix instead. This list covers the
 // units used elsewhere in this project (latency, payload size, consumer
-// lag, enum state) rather than every possible Prometheus unit. It's a
-// read-only lookup table, never mutated after package init, so it's not
-// the mutable global state CLAUDE.md's no-globals rule targets — Go
-// simply has no const slice literal to declare it as instead.
+// lag, enum state, per-tenant item counts) rather than every possible
+// Prometheus unit. It's a read-only lookup table, never mutated after
+// package init, so it's not the mutable global state CLAUDE.md's no-globals
+// rule targets — Go simply has no const slice literal to declare it as
+// instead.
 //
 //nolint:gochecknoglobals // read-only lookup table, see comment above
-var gaugeHistogramSuffixes = []string{"_seconds", "_bytes", "_ratio", "_messages", "_percent", "_state"}
+var gaugeHistogramSuffixes = []string{"_seconds", "_bytes", "_ratio", "_messages", "_percent", "_state", "_count"}
 
 // deniedLabels are label names that identify a single entity rather than a
 // bounded category, and so would make a metric's series count grow

@@ -25,6 +25,7 @@ import (
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion/kafka"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -67,7 +68,9 @@ func run() error {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
-	publisher, err := kafka.NewPublisher(kafkaConfig, registry)
+	knownTenants := knownTenantsFromEnv()
+
+	publisher, err := kafka.NewPublisher(kafkaConfig, registry, knownTenants)
 	if err != nil {
 		return fmt.Errorf("create kafka publisher: %w", err)
 	}
@@ -340,4 +343,26 @@ func backpressureConfigFromEnv() (ingestion.BackpressureConfig, error) {
 	}
 
 	return config, nil
+}
+
+// knownTenantsFromEnv reads INGESTION_KNOWN_TENANTS as a comma-separated
+// list of tenant IDs (matching provisioned TradingTenant resources) allowed
+// to appear verbatim as the "tenant" label on per-tenant metrics. Unset or
+// empty means every tenant ID reports as metrics.UnknownTenantLabel.
+func knownTenantsFromEnv() metrics.KnownTenants {
+	raw := os.Getenv("INGESTION_KNOWN_TENANTS")
+	if raw == "" {
+		return nil
+	}
+
+	var tenantIDs []string
+	for _, tenantID := range strings.Split(raw, ",") {
+		tenantID = strings.TrimSpace(tenantID)
+		if tenantID == "" {
+			continue
+		}
+		tenantIDs = append(tenantIDs, tenantID)
+	}
+
+	return metrics.NewKnownTenants(tenantIDs...)
 }

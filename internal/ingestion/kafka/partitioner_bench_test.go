@@ -4,7 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 // discardProducerClient is a producerClient double that reports every
@@ -62,10 +65,41 @@ func BenchmarkTenantTopicPartitionerPartitionExplicitTenant(b *testing.B) {
 	}
 }
 
+// TestTenantTopicPartitionerPartitionWithMetricsAllocatesNothingOnWarmTable
+// backs the "observePartitionCount is reported only on first assignment,
+// never on Partition()'s hot path" claim (see reservationTable's doc
+// comment and poolRangeFor) with an enforced regression guard, rather than
+// leaving it as a convention-only comment: once a tenant's range is
+// assigned, repeated Partition calls — even with a non-nil *Metrics wired
+// in — must do zero additional allocations.
+func TestTenantTopicPartitionerPartitionWithMetricsAllocatesNothingOnWarmTable(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	kafkaMetrics, err := NewMetrics(registry, metrics.NewKnownTenants("tenant-iso"))
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+
+	partitioner := newTenantPartitioner(TenantPartitionConfig{"tenant-iso": 4}, 1, kafkaMetrics)
+	topicPartitioner := partitioner.ForTopic("transaction-events")
+	record := &kgo.Record{Key: []byte("tenant-a:AAPL")}
+
+	// Warm up: the first call builds the reservation table and lazily
+	// assigns tenant-a its pool range, both one-time allocations that
+	// shouldn't be charged against the steady-state cost measured below.
+	topicPartitioner.Partition(record, 32)
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		topicPartitioner.Partition(record, 32)
+	})
+	if allocs != 0 {
+		t.Errorf("Partition() on a warm table with non-nil *Metrics allocated %.2f times per call, want 0", allocs)
+	}
+}
+
 // BenchmarkReservationTablePartitionFor isolates the reservation lookup and
 // instrument hash from kgo.Record/Partitioner overhead.
 func BenchmarkReservationTablePartitionFor(b *testing.B) {
-	table := newReservationTable(TenantPartitionConfig{"tenant-iso": 4}, 1, 32)
+	table := newReservationTable(TenantPartitionConfig{"tenant-iso": 4}, 1, 32, nil)
 	tenantID := []byte("tenant-a")
 	instrument := []byte("AAPL")
 

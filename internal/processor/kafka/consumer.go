@@ -334,6 +334,14 @@ func (con *Consumer) reconcileWithRetry(ctx context.Context, txn ledger.Transact
 // out-of-order second visit within the same poll can leave a momentarily
 // stale value until the next poll's report supersedes it — harmless for a
 // gauge scraped on a normal interval.
+//
+// The same per-partition pass also counts, per raw tenant ID, how many of
+// this instance's partitions yielded at least one record this poll, and
+// reports the totals once via con.metrics's active-consumer-count gauge
+// after EachPartition returns. A tenant with no active partitions this poll
+// simply isn't reported, leaving its last-known value in place rather than
+// resetting to zero — the same staleness trade-off the lag gauge already
+// accepts.
 func (con *Consumer) Run(ctx context.Context) error {
 	for {
 		fetches := con.client.PollFetches(ctx)
@@ -348,6 +356,11 @@ func (con *Consumer) Run(ctx context.Context) error {
 
 		if ctx.Err() != nil {
 			return nil
+		}
+
+		var activePartitionsByTenant map[string]int32
+		if con.metrics != nil {
+			activePartitionsByTenant = make(map[string]int32)
 		}
 
 		var dlqErr error
@@ -390,8 +403,12 @@ func (con *Consumer) Run(ctx context.Context) error {
 			if sawRecord && con.metrics != nil {
 				lag := partition.HighWatermark - 1 - lastOffset
 				con.metrics.observeLag(lastTenantID, lag)
+				activePartitionsByTenant[lastTenantID]++
 			}
 		})
+		if con.metrics != nil {
+			con.metrics.observeActiveConsumers(activePartitionsByTenant)
+		}
 		if dlqErr != nil {
 			if ctx.Err() != nil {
 				return nil

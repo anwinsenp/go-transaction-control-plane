@@ -72,7 +72,7 @@ func (*tenantTopicPartitioner) RequiresConsistency(*kgo.Record) bool { return tr
 // gap.
 func (part *tenantTopicPartitioner) Partition(record *kgo.Record, totalPartitions int) int {
 	if part.table == nil || part.table.totalPartitions != int32(totalPartitions) {
-		part.table = newReservationTable(part.reserved, part.defaultSize, int32(totalPartitions))
+		part.table = newReservationTable(part.reserved, part.defaultSize, int32(totalPartitions), part.metrics)
 		if part.metrics != nil && len(part.table.droppedTenants) > 0 {
 			part.metrics.tenantReservationDroppedTotal.Add(float64(len(part.table.droppedTenants)))
 		}
@@ -123,6 +123,7 @@ type reservationTable struct {
 	poolSize        int32
 	poolNext        int32
 	pool            map[string]partitionRange
+	metrics         *Metrics
 
 	// droppedTenants holds the IDs (sorted) of tenants configured in
 	// TenantPartitionConfig that couldn't be given any explicit range at
@@ -138,8 +139,10 @@ type reservationTable struct {
 // newReservationTable builds a reservationTable for totalPartitions
 // partitions. defaultSize < 1 is treated as DefaultPartitionsPerTenant;
 // totalPartitions < 1 is treated as 1, so the table is always usable even
-// before a topic's real partition count is known.
-func newReservationTable(reserved TenantPartitionConfig, defaultSize, totalPartitions int32) *reservationTable {
+// before a topic's real partition count is known. reportedMetrics is
+// optional: pass nil to skip reporting partition counts (e.g. in
+// benchmarks/tests that don't need it).
+func newReservationTable(reserved TenantPartitionConfig, defaultSize, totalPartitions int32, reportedMetrics *Metrics) *reservationTable {
 	if defaultSize < 1 {
 		defaultSize = DefaultPartitionsPerTenant
 	}
@@ -192,6 +195,9 @@ func newReservationTable(reserved TenantPartitionConfig, defaultSize, totalParti
 			size = explicitCapacity - cursor
 		}
 		explicit[tenantID] = partitionRange{start: cursor, size: size}
+		if reportedMetrics != nil {
+			reportedMetrics.observePartitionCount(tenantID, size)
+		}
 		cursor += size
 	}
 
@@ -207,6 +213,7 @@ func newReservationTable(reserved TenantPartitionConfig, defaultSize, totalParti
 		poolNext:        poolStart,
 		pool:            make(map[string]partitionRange),
 		droppedTenants:  droppedTenants,
+		metrics:         reportedMetrics,
 	}
 }
 
@@ -235,13 +242,24 @@ func (table *reservationTable) poolRangeFor(tenantID []byte) partitionRange {
 		// Truly nothing left in the pool: fall back to sharing a pool
 		// partition by hashing the tenant ID, same as every other
 		// pool-exhaustion tenant. Not cached, since a later call could
-		// observe a different table if the pool were ever to shrink again.
+		// observe a different table if the pool were ever to shrink again —
+		// and, since it's never cached, this tenant's partition-count gauge
+		// series never gets created at all (not merely stale). The
+		// operator's promquery client treats "no series matched" as a query
+		// error, which propagates as a Reconcile error and standard
+		// requeue/backoff rather than a silent no-op — so this tenant's
+		// TradingTenant simply never converges until the topic is
+		// repartitioned, the same failure mode an unscraped lag/latency
+		// series already has today.
 		return partitionRange{start: table.poolStart + int32(hashBytes(tenantID)%uint32(table.poolSize)), size: 1}
 	}
 
 	rng := partitionRange{start: table.poolNext, size: size}
 	table.poolNext += size
 	table.pool[string(tenantID)] = rng
+	if table.metrics != nil {
+		table.metrics.observePartitionCount(string(tenantID), rng.size)
+	}
 	return rng
 }
 

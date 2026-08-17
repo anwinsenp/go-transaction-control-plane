@@ -257,7 +257,7 @@ func TestConfigValidateValidTenantPartitions(t *testing.T) {
 }
 
 func TestNewPublisherRejectsInvalidConfig(t *testing.T) {
-	if _, err := NewPublisher(Config{}, prometheus.NewRegistry()); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := NewPublisher(Config{}, prometheus.NewRegistry(), nil); !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("NewPublisher() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
 	}
 }
@@ -270,7 +270,7 @@ func TestNewPublisherRejectsNilRegisterer(t *testing.T) {
 		Linger:         time.Millisecond,
 	}
 
-	if _, err := NewPublisher(config, nil); err == nil {
+	if _, err := NewPublisher(config, nil, nil); err == nil {
 		t.Error("NewPublisher() error = nil, want error for nil Registerer")
 	}
 }
@@ -287,7 +287,7 @@ func TestNewPublisherValidConfig(t *testing.T) {
 		Linger:         time.Millisecond,
 	}
 
-	publisher, err := NewPublisher(config, prometheus.NewRegistry())
+	publisher, err := NewPublisher(config, prometheus.NewRegistry(), nil)
 	if err != nil {
 		t.Fatalf("NewPublisher() error = %v, want nil", err)
 	}

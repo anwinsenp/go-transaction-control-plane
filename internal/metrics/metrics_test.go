@@ -95,6 +95,7 @@ func TestNewGauge(t *testing.T) {
 		{name: "valid messages suffix", metricName: "kafka_consumer_lag_messages"},
 		{name: "valid percent suffix", metricName: "cpu_usage_percent"},
 		{name: "valid state suffix", metricName: "circuit_breaker_state"},
+		{name: "valid count suffix", metricName: "tenant_partition_count"},
 		{
 			name:       "valid gauge with tenant_id label",
 			metricName: "kafka_consumer_lag_messages",

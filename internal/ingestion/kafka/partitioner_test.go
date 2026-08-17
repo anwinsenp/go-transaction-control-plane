@@ -3,7 +3,10 @@ package kafka
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 // rangesOverlap reports whether two half-open partition ranges intersect.
@@ -17,7 +20,7 @@ func TestNewReservationTableExplicitRangesDisjoint(t *testing.T) {
 		"tenant-b": 1,
 		"tenant-c": 3,
 	}
-	table := newReservationTable(reserved, DefaultPartitionsPerTenant, 8)
+	table := newReservationTable(reserved, DefaultPartitionsPerTenant, 8, nil)
 
 	if len(table.explicit) != len(reserved) {
 		t.Fatalf("len(explicit) = %d, want %d", len(table.explicit), len(reserved))
@@ -54,7 +57,7 @@ func TestNewReservationTableExplicitRangesDisjoint(t *testing.T) {
 
 func TestReservationTablePartitionForPoolTenantsUnique(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 2, "tenant-b": 1}
-	table := newReservationTable(reserved, 1, 8)
+	table := newReservationTable(reserved, 1, 8, nil)
 
 	poolTenants := []string{"tenant-c", "tenant-d", "tenant-e", "tenant-f"}
 	if int32(len(poolTenants)) > table.poolSize {
@@ -80,7 +83,7 @@ func TestReservationTablePartitionForPoolTenantsUnique(t *testing.T) {
 
 func TestReservationTablePartitionForDeterministic(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 3}
-	table := newReservationTable(reserved, 2, 8)
+	table := newReservationTable(reserved, 2, 8, nil)
 
 	tests := []struct {
 		name       string
@@ -106,7 +109,7 @@ func TestReservationTablePartitionForDeterministic(t *testing.T) {
 
 func TestReservationTablePartitionForInstrumentsStayWithinTenantRange(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 1, "tenant-b": 4}
-	table := newReservationTable(reserved, 1, 12)
+	table := newReservationTable(reserved, 1, 12, nil)
 
 	instruments := []string{"AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "NFLX", "META", "NVDA", "INTC", "AMD"}
 
@@ -141,7 +144,7 @@ func TestReservationTablePartitionForInstrumentsStayWithinTenantRange(t *testing
 
 func TestReservationTablePoolExhaustionFallback(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 3}
-	table := newReservationTable(reserved, 1, 4)
+	table := newReservationTable(reserved, 1, 4, nil)
 
 	if table.poolSize != 1 {
 		t.Fatalf("test setup: poolSize = %d, want 1 so pool exhaustion is exercised", table.poolSize)
@@ -162,7 +165,7 @@ func TestReservationTablePoolExhaustionFallback(t *testing.T) {
 // into an explicitly reserved tenant's own range.
 func TestReservationTablePoolNeverOverlapsExplicitWhenReservationsFillTable(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 2, "tenant-b": 3}
-	table := newReservationTable(reserved, 1, 5)
+	table := newReservationTable(reserved, 1, 5, nil)
 
 	explicitPartitions := make(map[int32]string)
 	for tenantID, rng := range table.explicit {
@@ -186,7 +189,7 @@ func TestReservationTablePoolNeverOverlapsExplicitWhenReservationsFillTable(t *t
 // though a smaller-but-still-exclusive block was available.
 func TestReservationTablePoolRangeForClipsToRemainingCapacity(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 6}
-	table := newReservationTable(reserved, 3, 8)
+	table := newReservationTable(reserved, 3, 8, nil)
 
 	if table.poolSize != 2 {
 		t.Fatalf("test setup: poolSize = %d, want 2 so a defaultSize=3 tenant can't fully fit", table.poolSize)
@@ -220,7 +223,7 @@ func TestReservationTablePoolRangeForClipsToRemainingCapacity(t *testing.T) {
 // explicitCapacity were silently dropped with no way to observe the loss.
 func TestNewReservationTableRecordsDroppedTenants(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 4, "tenant-b": 3, "tenant-c": 3}
-	table := newReservationTable(reserved, 1, 8)
+	table := newReservationTable(reserved, 1, 8, nil)
 
 	// explicitCapacity is 7 (totalPartitions-1); tenant-a and tenant-b
 	// consume it in full (sorted order), leaving tenant-c dropped.
@@ -235,11 +238,54 @@ func TestNewReservationTableRecordsDroppedTenants(t *testing.T) {
 
 func TestNewReservationTableNoDroppedTenantsWhenAllFit(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 2, "tenant-b": 1}
-	table := newReservationTable(reserved, 1, 8)
+	table := newReservationTable(reserved, 1, 8, nil)
 
 	if table.droppedTenants != nil {
 		t.Errorf("droppedTenants = %v, want nil", table.droppedTenants)
 	}
+}
+
+// TestNewReservationTableReportsExplicitPartitionCounts confirms building a
+// table with explicit reservations reports each explicit tenant's assigned
+// size on the partition-count gauge, so an operator scraping this service
+// can observe ADR 0007's reservation table directly.
+func TestNewReservationTableReportsExplicitPartitionCounts(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	kafkaMetrics, err := NewMetrics(registry, metrics.NewKnownTenants("tenant-a", "tenant-b"))
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+
+	reserved := TenantPartitionConfig{"tenant-a": 2, "tenant-b": 3}
+	newReservationTable(reserved, 1, 8, kafkaMetrics)
+
+	scraped := scrapeMetrics(t, registry)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-a"} 2`)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-b"} 3`)
+}
+
+// TestReservationTablePoolRangeForReportsPartitionCountOnFirstAssignment
+// confirms a pool tenant's assigned size is reported on first sight (a
+// cache miss) and stays correct — not doubled, not erroring — after a
+// second poolRangeFor call for the same tenant with the table unchanged (a
+// cache hit, which never re-invokes observePartitionCount).
+func TestReservationTablePoolRangeForReportsPartitionCountOnFirstAssignment(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	kafkaMetrics, err := NewMetrics(registry, metrics.NewKnownTenants("tenant-c"))
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+
+	reserved := TenantPartitionConfig{"tenant-a": 2}
+	table := newReservationTable(reserved, 1, 8, kafkaMetrics)
+
+	table.poolRangeFor([]byte("tenant-c"))
+	scraped := scrapeMetrics(t, registry)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-c"} 1`)
+
+	table.poolRangeFor([]byte("tenant-c"))
+	scraped = scrapeMetrics(t, registry)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-c"} 1`)
 }
 
 func TestSplitPartitionKey(t *testing.T) {

@@ -14,11 +14,16 @@ import (
 // domain layer and reports its own transport-level concerns.
 type Metrics struct {
 	tenantReservationDroppedTotal prometheus.Counter
+	partitionCount                *prometheus.GaugeVec
+	knownTenants                  metrics.KnownTenants
 }
 
 // NewMetrics registers this package's metrics on reg and returns a Metrics
-// ready to be passed to NewPublisher.
-func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
+// ready to be passed to NewPublisher. knownTenants bounds which tenant IDs
+// are used verbatim as the partition-count gauge's "tenant" label value (see
+// metrics.KnownTenants); every other tenant ID reports as
+// metrics.UnknownTenantLabel instead.
+func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*Metrics, error) {
 	tenantReservationDropped, err := metrics.NewCounter(reg, prometheus.CounterOpts{
 		Name: "ingestion_kafka_tenant_reservation_dropped_total",
 		Help: "Total tenants configured in Config.TenantPartitions that could not be given an exclusive partition range because the topic did not have enough partitions to honor every reservation.",
@@ -27,5 +32,27 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		return nil, fmt.Errorf("new kafka metrics: %w", err)
 	}
 
-	return &Metrics{tenantReservationDroppedTotal: tenantReservationDropped.WithLabelValues()}, nil
+	partitionCount, err := metrics.NewGauge(reg, prometheus.GaugeOpts{
+		Name: "ingestion_kafka_tenant_partition_count",
+		Help: "Number of Kafka partitions reserved for a tenant in the tenant->partition reservation table (ADR 0007), by tenant. Read by the operator to populate TradingTenant status.observedPartitionCount.",
+	}, "tenant")
+	if err != nil {
+		return nil, fmt.Errorf("new kafka metrics: %w", err)
+	}
+
+	return &Metrics{
+		tenantReservationDroppedTotal: tenantReservationDropped.WithLabelValues(),
+		partitionCount:                partitionCount,
+		knownTenants:                  knownTenants,
+	}, nil
+}
+
+// observePartitionCount reports count as tenantID's resolved label's current
+// partition-count gauge value. Called only when a tenant's reservation range
+// is first established (an explicit reservation at table-build time, or a
+// pool assignment on first sight of that tenant) — never on the per-record
+// Partition() hot path — so it never affects the publisher's zero-allocation
+// steady state.
+func (reportedMetrics *Metrics) observePartitionCount(tenantID string, count int32) {
+	reportedMetrics.partitionCount.WithLabelValues(reportedMetrics.knownTenants.TenantLabel(tenantID)).Set(float64(count))
 }

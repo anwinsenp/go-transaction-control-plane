@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -40,7 +41,7 @@ func requireMetricsLine(t *testing.T, scraped, line string) {
 func TestNewMetricsRegistersSuccessfully(t *testing.T) {
 	registry := prometheus.NewRegistry()
 
-	kafkaMetrics, err := NewMetrics(registry)
+	kafkaMetrics, err := NewMetrics(registry, nil)
 	if err != nil {
 		t.Fatalf("NewMetrics() unexpected error: %v", err)
 	}
@@ -55,11 +56,11 @@ func TestNewMetricsRegistersSuccessfully(t *testing.T) {
 func TestNewMetricsDuplicateRegistrationReturnsError(t *testing.T) {
 	registry := prometheus.NewRegistry()
 
-	if _, firstErr := NewMetrics(registry); firstErr != nil {
+	if _, firstErr := NewMetrics(registry, nil); firstErr != nil {
 		t.Fatalf("first NewMetrics() unexpected error: %v", firstErr)
 	}
 
-	secondMetrics, secondErr := NewMetrics(registry)
+	secondMetrics, secondErr := NewMetrics(registry, nil)
 	if secondErr == nil {
 		t.Fatal("second NewMetrics() on the same registerer = nil error, want a registration conflict error")
 	}
@@ -75,7 +76,7 @@ func TestNewMetricsDuplicateRegistrationReturnsError(t *testing.T) {
 // must report every dropped tenant on tenantReservationDroppedTotal.
 func TestTenantTopicPartitionerPartitionReportsDroppedTenants(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	kafkaMetrics, err := NewMetrics(registry)
+	kafkaMetrics, err := NewMetrics(registry, nil)
 	if err != nil {
 		t.Fatalf("NewMetrics() unexpected error: %v", err)
 	}
@@ -97,6 +98,53 @@ func TestTenantTopicPartitionerPartitionReportsDroppedTenants(t *testing.T) {
 	topicPartitioner.Partition(record, 8)
 	scraped = scrapeMetrics(t, registry)
 	requireMetricsLine(t, scraped, "ingestion_kafka_tenant_reservation_dropped_total 1")
+}
+
+// TestMetricsObservePartitionCount confirms observePartitionCount resolves
+// tenantID through knownTenants before labeling
+// ingestion_kafka_tenant_partition_count, the same resolution contract
+// processor/kafka's observeLag already follows.
+func TestMetricsObservePartitionCount(t *testing.T) {
+	testCases := []struct {
+		name         string
+		knownTenants metrics.KnownTenants
+		tenantID     string
+		count        int32
+		wantLabel    string
+		wantCount    int32
+	}{
+		{
+			name:         "known tenant is labeled verbatim",
+			knownTenants: metrics.NewKnownTenants("tenant-1"),
+			tenantID:     "tenant-1",
+			count:        4,
+			wantLabel:    "tenant-1",
+			wantCount:    4,
+		},
+		{
+			name:         "unknown tenant falls back to UnknownTenantLabel",
+			knownTenants: metrics.NewKnownTenants("tenant-1"),
+			tenantID:     "tenant-unregistered",
+			count:        2,
+			wantLabel:    metrics.UnknownTenantLabel,
+			wantCount:    2,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			kafkaMetrics, err := NewMetrics(registry, testCase.knownTenants)
+			if err != nil {
+				t.Fatalf("NewMetrics() unexpected error: %v", err)
+			}
+
+			kafkaMetrics.observePartitionCount(testCase.tenantID, testCase.count)
+
+			scraped := scrapeMetrics(t, registry)
+			requireMetricsLine(t, scraped, fmt.Sprintf(`ingestion_kafka_tenant_partition_count{tenant="%s"} %d`, testCase.wantLabel, testCase.wantCount))
+		})
+	}
 }
 
 func TestTenantTopicPartitionerPartitionNilMetricsIsSafe(t *testing.T) {

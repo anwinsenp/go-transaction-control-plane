@@ -14,13 +14,14 @@ import (
 // domain layer and reports its own transport-level concerns.
 type Metrics struct {
 	consumerLagMessages *prometheus.GaugeVec
+	activeConsumerCount *prometheus.GaugeVec
 	knownTenants        metrics.KnownTenants
 }
 
 // NewMetrics registers this package's metrics on reg and returns a Metrics
 // ready to be passed to NewConsumer. knownTenants bounds which tenant IDs
-// are used verbatim as the lag gauge's "tenant" label value (see
-// metrics.KnownTenants); every other tenant ID reports as
+// are used verbatim as the lag and active-consumer-count gauges' "tenant"
+// label value (see metrics.KnownTenants); every other tenant ID reports as
 // metrics.UnknownTenantLabel instead.
 func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*Metrics, error) {
 	consumerLag, err := metrics.NewGauge(reg, prometheus.GaugeOpts{
@@ -31,7 +32,15 @@ func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*
 		return nil, fmt.Errorf("new processor kafka metrics: %w", err)
 	}
 
-	return &Metrics{consumerLagMessages: consumerLag, knownTenants: knownTenants}, nil
+	activeConsumerCount, err := metrics.NewGauge(reg, prometheus.GaugeOpts{
+		Name: "processor_kafka_active_consumer_count",
+		Help: "Number of this processor instance's assigned partitions that yielded at least one record for a tenant in the most recent poll batch, by tenant — a proxy for that tenant's active consumer parallelism on this instance. Since consumer group partitions are split across replicas, sum this across instances (e.g. `sum by (tenant)`) for a tenant's cluster-wide active consumer count.",
+	}, "tenant")
+	if err != nil {
+		return nil, fmt.Errorf("new processor kafka metrics: %w", err)
+	}
+
+	return &Metrics{consumerLagMessages: consumerLag, activeConsumerCount: activeConsumerCount, knownTenants: knownTenants}, nil
 }
 
 // observeLag reports lag (clamped to zero, since a partition briefly ahead
@@ -42,4 +51,21 @@ func (reportedMetrics *Metrics) observeLag(tenantID string, lag int64) {
 		lag = 0
 	}
 	reportedMetrics.consumerLagMessages.WithLabelValues(reportedMetrics.knownTenants.TenantLabel(tenantID)).Set(float64(lag))
+}
+
+// observeActiveConsumers reports one poll batch's per-tenant active-partition
+// counts, keyed by raw tenant ID in counts. Multiple raw tenant IDs that
+// resolve to the same label (most commonly metrics.UnknownTenantLabel, when
+// several tenants outside knownTenants were active in the same batch) are
+// summed before Set, so they don't overwrite each other on that shared
+// label.
+func (reportedMetrics *Metrics) observeActiveConsumers(counts map[string]int32) {
+	totals := make(map[string]int32, len(counts))
+	for tenantID, count := range counts {
+		label := reportedMetrics.knownTenants.TenantLabel(tenantID)
+		totals[label] += count
+	}
+	for label, total := range totals {
+		reportedMetrics.activeConsumerCount.WithLabelValues(label).Set(float64(total))
+	}
 }

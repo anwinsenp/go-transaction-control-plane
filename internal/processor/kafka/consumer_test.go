@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -184,6 +185,27 @@ func fetchesWithEmptyPartition(topic string, highWatermark int64) kgo.Fetches {
 				HighWatermark: highWatermark,
 				Records:       nil,
 			}},
+		}},
+	}}
+}
+
+// fetchesWithPartitionTenants builds a fetch batch with one partition per
+// entry in tenantsByPartition (partition indices 0..len-1), each carrying a
+// single decodable record for the given tenant, so active-consumer-count
+// tests can control how many partitions were active for each tenant in one
+// poll.
+func fetchesWithPartitionTenants(topic string, tenantsByPartition ...string) kgo.Fetches {
+	partitions := make([]kgo.FetchPartition, len(tenantsByPartition))
+	for i, tenantID := range tenantsByPartition {
+		partitions[i] = kgo.FetchPartition{
+			Partition: int32(i),
+			Records:   []*kgo.Record{{Topic: topic, Offset: 0, Value: validTransactionPayloadForTenant(tenantID)}},
+		}
+	}
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic:      topic,
+			Partitions: partitions,
 		}},
 	}}
 }
@@ -965,4 +987,40 @@ func TestConsumerRunEmptyPartitionSkipsLagGauge(t *testing.T) {
 
 	scraped := scrapeMetrics(t, registry)
 	requireMetricsLineAbsent(t, scraped, "processor_kafka_consumer_lag_messages{")
+}
+
+// TestConsumerRunReportsActiveConsumerCount drives Run through a single poll
+// batch spanning three partitions — two active for tenant-1, one for
+// tenant-2 — and confirms the active-consumer-count gauge reports each
+// tenant's active partition count for that batch, resolved through
+// knownTenants the same way the lag gauge already is.
+func TestConsumerRunReportsActiveConsumerCount(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{
+			fetchesWithPartitionTenants("transaction-events", "tenant-1", "tenant-1", "tenant-2"),
+			fetchesWithError("transaction-events", 0, brokerErr),
+		},
+	}
+	registry := prometheus.NewRegistry()
+	consumerMetrics, err := NewMetrics(registry, metrics.NewKnownTenants("tenant-2"))
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+	consumer := &Consumer{
+		client:  fake,
+		topic:   "transaction-events",
+		rec:     &fakeReconciler{},
+		metrics: consumerMetrics,
+	}
+
+	if err := consumer.Run(context.Background()); !errors.Is(err, brokerErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, brokerErr)
+	}
+
+	// tenant-1 is outside knownTenants and had two active partitions;
+	// tenant-2 is known and had one.
+	scraped := scrapeMetrics(t, registry)
+	requireMetricsLine(t, scraped, fmt.Sprintf(`processor_kafka_active_consumer_count{tenant="%s"} 2`, metrics.UnknownTenantLabel))
+	requireMetricsLine(t, scraped, `processor_kafka_active_consumer_count{tenant="tenant-2"} 1`)
 }

@@ -126,3 +126,56 @@ func TestMetrics_ObserveLag(t *testing.T) {
 		})
 	}
 }
+
+// TestMetrics_ObserveActiveConsumers covers observeActiveConsumers's
+// resolve-then-sum contract: raw tenant IDs that resolve to the same label
+// (most commonly metrics.UnknownTenantLabel, when several tenants outside
+// knownTenants are active in the same poll batch) must be summed into one
+// observation rather than the last one silently overwriting the others.
+func TestMetrics_ObserveActiveConsumers(t *testing.T) {
+	testCases := []struct {
+		name         string
+		knownTenants metrics.KnownTenants
+		counts       map[string]int32
+		wantLines    []string
+	}{
+		{
+			name:         "single known tenant",
+			knownTenants: metrics.NewKnownTenants("tenant-1"),
+			counts:       map[string]int32{"tenant-1": 3},
+			wantLines:    []string{`processor_kafka_active_consumer_count{tenant="tenant-1"} 3`},
+		},
+		{
+			name:         "two unknown tenants sum into UnknownTenantLabel",
+			knownTenants: metrics.NewKnownTenants("tenant-1"),
+			counts:       map[string]int32{"tenant-x": 2, "tenant-y": 5},
+			wantLines:    []string{fmt.Sprintf(`processor_kafka_active_consumer_count{tenant="%s"} 7`, metrics.UnknownTenantLabel)},
+		},
+		{
+			name:         "one known and one unknown tenant report separately",
+			knownTenants: metrics.NewKnownTenants("tenant-1"),
+			counts:       map[string]int32{"tenant-1": 4, "tenant-x": 2},
+			wantLines: []string{
+				`processor_kafka_active_consumer_count{tenant="tenant-1"} 4`,
+				fmt.Sprintf(`processor_kafka_active_consumer_count{tenant="%s"} 2`, metrics.UnknownTenantLabel),
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			kafkaMetrics, err := NewMetrics(registry, testCase.knownTenants)
+			if err != nil {
+				t.Fatalf("NewMetrics() unexpected error: %v", err)
+			}
+
+			kafkaMetrics.observeActiveConsumers(testCase.counts)
+
+			scraped := scrapeMetrics(t, registry)
+			for _, line := range testCase.wantLines {
+				requireMetricsLine(t, scraped, line)
+			}
+		})
+	}
+}

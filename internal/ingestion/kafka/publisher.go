@@ -16,6 +16,7 @@ import (
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ingestion"
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 // ErrInvalidConfig indicates a Config failed validation.
@@ -154,13 +155,15 @@ var _ ingestion.Publisher = (*Publisher)(nil)
 
 // NewPublisher builds a Publisher connected to the brokers in cfg,
 // reporting the tenant partition reservation table's metrics (see
-// NewMetrics) on reg. Durability is set to wait for acknowledgment from
+// NewMetrics) on reg. knownTenants bounds which tenant IDs are used verbatim
+// as the partition-count gauge's "tenant" label value (see
+// metrics.KnownTenants). Durability is set to wait for acknowledgment from
 // all in-sync replicas (RequiredAcks(AllISRAcks())) rather than just the
 // partition leader — a transaction event lost after a leader crash but
 // before ISR replication would silently vanish from the ledger, which this
 // service's correctness goals don't allow trading away for lower publish
 // latency.
-func NewPublisher(cfg Config, reg prometheus.Registerer) (*Publisher, error) {
+func NewPublisher(cfg Config, reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*Publisher, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("new kafka publisher: %w", err)
 	}
@@ -168,7 +171,7 @@ func NewPublisher(cfg Config, reg prometheus.Registerer) (*Publisher, error) {
 		return nil, fmt.Errorf("new kafka publisher: reg must not be nil")
 	}
 
-	kafkaMetrics, err := NewMetrics(reg)
+	kafkaMetrics, err := NewMetrics(reg, knownTenants)
 	if err != nil {
 		return nil, fmt.Errorf("new kafka publisher: %w", err)
 	}

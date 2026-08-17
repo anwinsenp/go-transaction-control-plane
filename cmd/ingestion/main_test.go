@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/api"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 func TestRunGracefulShutdown(t *testing.T) {
@@ -111,6 +112,44 @@ func TestAPIKeysFromEnv(t *testing.T) {
 			}
 			if !reflect.DeepEqual(keys, test.wantKeys) {
 				t.Errorf("apiKeysFromEnv() = %v, want %v", keys, test.wantKeys)
+			}
+		})
+	}
+}
+
+func TestKnownTenantsFromEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		envUnset bool
+		envValue string
+		want     metrics.KnownTenants
+	}{
+		{name: "unset resolves to nil", envUnset: true, want: nil},
+		{name: "empty string resolves to nil", envValue: "", want: nil},
+		{name: "single tenant", envValue: "tenant-1", want: metrics.NewKnownTenants("tenant-1")},
+		{name: "multiple comma-separated tenants", envValue: "tenant-1,tenant-2,tenant-3", want: metrics.NewKnownTenants("tenant-1", "tenant-2", "tenant-3")},
+		{name: "tenants with surrounding whitespace trimmed", envValue: " tenant-1 , tenant-2 ", want: metrics.NewKnownTenants("tenant-1", "tenant-2")},
+		{name: "mixed empty and valid entries skips empties", envValue: "tenant-1,,tenant-2", want: metrics.NewKnownTenants("tenant-1", "tenant-2")},
+		{name: "whitespace and empty entries only resolves to an empty set", envValue: " , , ", want: metrics.NewKnownTenants()},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.envUnset {
+				original, wasSet := lookupAndUnsetEnv(t, "INGESTION_KNOWN_TENANTS")
+				t.Cleanup(func() {
+					if wasSet {
+						t.Setenv("INGESTION_KNOWN_TENANTS", original)
+					}
+				})
+			} else {
+				t.Setenv("INGESTION_KNOWN_TENANTS", test.envValue)
+			}
+
+			got := knownTenantsFromEnv()
+
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("knownTenantsFromEnv() = %v, want %v", got, test.want)
 			}
 		})
 	}
