@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	tradingv1alpha1 "github.com/anwinsenp/go-transaction-control-plane/operator/api/v1alpha1"
 	"github.com/anwinsenp/go-transaction-control-plane/operator/internal/promquery"
@@ -439,5 +442,242 @@ func TestReconcile_RecordsErrorMetric(t *testing.T) {
 	}
 	if gotSuccess := sampleCountForLabel(t, registry, resultSuccess); gotSuccess != 0 {
 		t.Errorf("success bucket sample count = %v, want 0", gotSuccess)
+	}
+}
+
+// drainFakeRecorderEvents collects every event currently buffered on
+// recorder.Events without blocking, so tests can assert on the exact count
+// and content of events emitted by a single Reconcile call.
+func drainFakeRecorderEvents(recorder *record.FakeRecorder) []string {
+	var events []string
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			return events
+		}
+	}
+}
+
+func TestReconcile_FirstTransitionEmitsEventAndMetric(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+	recorder := record.NewFakeRecorder(10)
+
+	tenant := newTestTenant()
+	// Status.State is the zero value "" on a brand-new tenant, so any
+	// computed state counts as a transition worth recording.
+	observer := &fakeObserver{lag: 100, p99Ms: 10, partitionCount: 12}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+	reconciler.Recorder = recorder
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcileRequest(tenant)); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	events := drainFakeRecorderEvents(recorder)
+	if len(events) != 1 {
+		t.Fatalf("recorded events = %v, want exactly 1", events)
+	}
+	wantReason := string(tradingv1alpha1.TradingTenantStateStable)
+	if !strings.Contains(events[0], wantReason) {
+		t.Errorf("event = %q, want it to contain reason %q", events[0], wantReason)
+	}
+
+	if got := sampleCountForIsolationLabel(t, registry, wantReason); got != 1 {
+		t.Errorf("isolation transition count for state=%s = %v, want 1", wantReason, got)
+	}
+}
+
+func TestReconcile_GenuineTransitionEmitsWarningEvent(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+	recorder := record.NewFakeRecorder(10)
+
+	tenant := newTestTenant()
+	tenant.Status.State = tradingv1alpha1.TradingTenantStateStable
+	// lag high, latency normal, partition parity: drives classify to Isolated.
+	observer := &fakeObserver{lag: 2000, p99Ms: 10, partitionCount: 3}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+	reconciler.Recorder = recorder
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcileRequest(tenant)); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	events := drainFakeRecorderEvents(recorder)
+	var sawTransitionEvent bool
+	for _, event := range events {
+		if strings.HasPrefix(event, "Warning Isolated ") {
+			sawTransitionEvent = true
+		}
+	}
+	if !sawTransitionEvent {
+		t.Errorf("recorded events = %v, want a Warning event with reason Isolated", events)
+	}
+
+	if got := sampleCountForIsolationLabel(t, registry, string(tradingv1alpha1.TradingTenantStateIsolated)); got != 1 {
+		t.Errorf("isolation transition count for state=Isolated = %v, want 1", got)
+	}
+}
+
+func TestReconcile_IdempotentReconcileEmitsNoAdditionalEvents(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+	recorder := record.NewFakeRecorder(10)
+
+	tenant := newTestTenant()
+	observer := &fakeObserver{lag: 100, p99Ms: 10, partitionCount: 12}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+	reconciler.Recorder = recorder
+	request := reconcileRequest(tenant)
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("first Reconcile returned error: %v", err)
+	}
+	firstPassEvents := drainFakeRecorderEvents(recorder)
+	if len(firstPassEvents) != 1 {
+		t.Fatalf("events after first Reconcile = %v, want exactly 1", firstPassEvents)
+	}
+	wantReason := string(tradingv1alpha1.TradingTenantStateStable)
+	if got := sampleCountForIsolationLabel(t, registry, wantReason); got != 1 {
+		t.Fatalf("isolation transition count for state=%s after first Reconcile = %v, want 1", wantReason, got)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("second Reconcile returned error: %v", err)
+	}
+
+	secondPassEvents := drainFakeRecorderEvents(recorder)
+	if len(secondPassEvents) != 0 {
+		t.Errorf("events after second (unchanged) Reconcile = %v, want none", secondPassEvents)
+	}
+	if got := sampleCountForIsolationLabel(t, registry, wantReason); got != 1 {
+		t.Errorf("isolation transition count for state=%s after second Reconcile = %v, want still 1 (no additional increment)", wantReason, got)
+	}
+}
+
+func TestReconcile_DedicatedPoolCreatedFiresOnce(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+	recorder := record.NewFakeRecorder(10)
+
+	tenant := newTestTenant()
+	// Status.State already Isolated and the isolate branch is triggered
+	// again below, so the state-transition event never fires here: this
+	// test isolates the DedicatedPoolCreated signal from the state one.
+	tenant.Status.State = tradingv1alpha1.TradingTenantStateIsolated
+	tenant.Spec.Isolation.DedicatedNodePool = false
+	observer := &fakeObserver{lag: 2000, p99Ms: 10, partitionCount: 3}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	reconciler.Metrics = reportedMetrics
+	reconciler.Recorder = recorder
+	request := reconcileRequest(tenant)
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("first Reconcile returned error: %v", err)
+	}
+
+	firstPassEvents := drainFakeRecorderEvents(recorder)
+	if len(firstPassEvents) != 1 {
+		t.Fatalf("events after first Reconcile = %v, want exactly 1 (DedicatedPoolCreated)", firstPassEvents)
+	}
+	if !strings.Contains(firstPassEvents[0], reasonDedicatedPoolCreated) {
+		t.Errorf("event = %q, want it to contain reason %q", firstPassEvents[0], reasonDedicatedPoolCreated)
+	}
+	if got := sampleCountForIsolationLabel(t, registry, reasonDedicatedPoolCreated); got != 1 {
+		t.Errorf("isolation transition count for state=%s after first Reconcile = %v, want 1", reasonDedicatedPoolCreated, got)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("second Reconcile returned error: %v", err)
+	}
+
+	secondPassEvents := drainFakeRecorderEvents(recorder)
+	if len(secondPassEvents) != 0 {
+		t.Errorf("events after second Reconcile = %v, want none (spec flag already true)", secondPassEvents)
+	}
+	if got := sampleCountForIsolationLabel(t, registry, reasonDedicatedPoolCreated); got != 1 {
+		t.Errorf("isolation transition count for state=%s after second Reconcile = %v, want still 1", reasonDedicatedPoolCreated, got)
+	}
+}
+
+func TestReconcile_StatusUpdateFailureSkipsTransitionEvent(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	reportedMetrics, err := NewMetrics(registry)
+	if err != nil {
+		t.Fatalf("NewMetrics returned error: %v", err)
+	}
+	recorder := record.NewFakeRecorder(10)
+
+	sentinelErr := errors.New("status update rejected")
+	tenant := newTestTenant()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme(t)).
+		WithStatusSubresource(&tradingv1alpha1.TradingTenant{}).
+		WithObjects(tenant).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, innerClient client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" {
+					return sentinelErr
+				}
+				return innerClient.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &TradingTenantReconciler{
+		Client:   fakeClient,
+		Observer: &fakeObserver{lag: 100, p99Ms: 10, partitionCount: 12},
+		Metrics:  reportedMetrics,
+		Recorder: recorder,
+	}
+
+	_, err = reconciler.Reconcile(context.Background(), reconcileRequest(tenant))
+	if err == nil {
+		t.Fatal("Reconcile returned nil error, want the status update error surfaced")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("Reconcile error = %v, want it to wrap %v", err, sentinelErr)
+	}
+
+	events := drainFakeRecorderEvents(recorder)
+	if len(events) != 0 {
+		t.Errorf("events after failed status update = %v, want none", events)
+	}
+	wantReason := string(tradingv1alpha1.TradingTenantStateStable)
+	if got := sampleCountForIsolationLabel(t, registry, wantReason); got != 0 {
+		t.Errorf("isolation transition count for state=%s after failed status update = %v, want 0", wantReason, got)
+	}
+}
+
+func TestReconcile_NilRecorderAndMetricsSafe(t *testing.T) {
+	tenant := newTestTenant()
+	// lag high, latency normal, partition parity: a state-changing pass
+	// that would call recordTransition and, on the first pass, the
+	// DedicatedPoolCreated path too, exercising both nil-guarded branches.
+	observer := &fakeObserver{lag: 2000, p99Ms: 10, partitionCount: 3}
+	reconciler, _ := newReconciler(t, tenant, observer)
+	// reconciler.Recorder and reconciler.Metrics are left at their zero
+	// value (nil) deliberately.
+
+	if _, err := reconciler.Reconcile(context.Background(), reconcileRequest(tenant)); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
 	}
 }

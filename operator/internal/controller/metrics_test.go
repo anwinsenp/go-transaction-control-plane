@@ -5,9 +5,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	tradingv1alpha1 "github.com/anwinsenp/go-transaction-control-plane/operator/api/v1alpha1"
 )
 
 const reconcileDurationMetricName = "tradingtenant_reconcile_duration_seconds"
+const isolationTransitionsMetricName = "tradingtenant_isolation_transitions_total"
 
 func TestNewMetrics_RegistersHistogram(t *testing.T) {
 	registry := prometheus.NewRegistry()
@@ -107,6 +110,68 @@ func TestMetrics_ObserveDuration(t *testing.T) {
 	}
 }
 
+func TestMetrics_ObserveIsolationTransition(t *testing.T) {
+	testCases := []struct {
+		name      string
+		reason    string
+		wantKnown bool
+	}{
+		{
+			name:      "stable reason increments the stable counter",
+			reason:    string(tradingv1alpha1.TradingTenantStateStable),
+			wantKnown: true,
+		},
+		{
+			name:      "scaling reason increments the scaling counter",
+			reason:    string(tradingv1alpha1.TradingTenantStateScaling),
+			wantKnown: true,
+		},
+		{
+			name:      "isolated reason increments the isolated counter",
+			reason:    string(tradingv1alpha1.TradingTenantStateIsolated),
+			wantKnown: true,
+		},
+		{
+			name:      "degraded reason increments the degraded counter",
+			reason:    string(tradingv1alpha1.TradingTenantStateDegraded),
+			wantKnown: true,
+		},
+		{
+			name:      "dedicated pool created reason increments its counter",
+			reason:    reasonDedicatedPoolCreated,
+			wantKnown: true,
+		},
+		{
+			name:      "unknown reason is a silent no-op",
+			reason:    "SomethingUnexpected",
+			wantKnown: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			reportedMetrics, err := NewMetrics(registry)
+			if err != nil {
+				t.Fatalf("NewMetrics returned error: %v", err)
+			}
+
+			reportedMetrics.observeIsolationTransition(testCase.reason)
+
+			for _, knownReason := range isolationTransitionReasons {
+				want := 0.0
+				if testCase.wantKnown && knownReason == testCase.reason {
+					want = 1
+				}
+				got := sampleCountForIsolationLabel(t, registry, knownReason)
+				if got != want {
+					t.Errorf("isolation transition count for state=%s = %v, want %v", knownReason, got, want)
+				}
+			}
+		})
+	}
+}
+
 // sampleCountForLabel returns the histogram sample count recorded against
 // the reconcile duration histogram's "result" label with the given value.
 // It fails the test via t.Fatalf if the metric family or the label value
@@ -136,5 +201,33 @@ func sampleCountForLabel(t *testing.T, gatherer prometheus.Gatherer, resultLabel
 		t.Fatalf("metric family %s found but no sample with label result=%s", reconcileDurationMetricName, resultLabel)
 	}
 	t.Fatalf("metric family %s not found in gathered output", reconcileDurationMetricName)
+	return 0
+}
+
+// sampleCountForIsolationLabel returns the counter value recorded against
+// the isolation-transitions counter's "transition" label with the given
+// value. Mirrors sampleCountForLabel's fail-loud-on-missing-sample behavior
+// so a typo'd label can't be mistaken for a genuine zero-count observation.
+func sampleCountForIsolationLabel(t *testing.T, gatherer prometheus.Gatherer, stateLabel string) float64 {
+	t.Helper()
+
+	metricFamilies, err := gatherer.Gather()
+	if err != nil {
+		t.Fatalf("gatherer.Gather: %v", err)
+	}
+	for _, family := range metricFamilies {
+		if family.GetName() != isolationTransitionsMetricName {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "transition" && label.GetValue() == stateLabel {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+		t.Fatalf("metric family %s found but no sample with label transition=%s", isolationTransitionsMetricName, stateLabel)
+	}
+	t.Fatalf("metric family %s not found in gathered output", isolationTransitionsMetricName)
 	return 0
 }

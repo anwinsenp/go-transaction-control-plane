@@ -8,14 +8,22 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	tradingv1alpha1 "github.com/anwinsenp/go-transaction-control-plane/operator/api/v1alpha1"
 	"github.com/anwinsenp/go-transaction-control-plane/operator/internal/promquery"
 )
+
+// reasonDedicatedPoolCreated is the Event reason and isolation-transition
+// counter label for the isolation.dedicatedNodePool spec flag flipping to
+// true — a distinct signal from the TradingTenantState transitions, since
+// it's a spec update, not a status.state value (see #58).
+const reasonDedicatedPoolCreated = "DedicatedPoolCreated"
 
 // defaultTenantLabelName matches the "tenant" label every per-tenant gauge
 // in this repo actually uses (see internal/metrics.KnownTenants and its
@@ -56,10 +64,15 @@ type TradingTenantReconciler struct {
 	// pass. Defaults to 30 seconds if unset.
 	RequeueInterval time.Duration
 
-	// Metrics reports reconcile loop duration. Optional: nil skips
-	// recording, so tests and callers that don't need metrics can leave it
-	// unset.
+	// Metrics reports reconcile loop duration and isolation state
+	// transitions. Optional: nil skips recording, so tests and callers
+	// that don't need metrics can leave it unset.
 	Metrics *Metrics
+
+	// Recorder emits Kubernetes Events for isolation state transitions
+	// (see #58), the secondary audit trail alongside the Metrics counter.
+	// Optional: nil skips emitting Events.
+	Recorder record.EventRecorder
 }
 
 // reconcileDecision is the outcome of classifying one tenant's observed
@@ -131,6 +144,7 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		baseline = tenant.Spec.MinReplicas
 	}
 
+	oldState := tenant.Status.State
 	decision := classify(tenant.Spec, baseline, tenant.Spec.Isolation.DedicatedNodePool, lag, p99Ms, partitionCount)
 
 	// isolation.dedicatedNodePool is the only field this reconciler writes
@@ -143,6 +157,8 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(reconcileCtx, &tenant); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: updating isolation spec: %w", req.NamespacedName, err)
 		}
+		r.recordTransition(&tenant, reasonDedicatedPoolCreated, corev1.EventTypeNormal,
+			fmt.Sprintf("Tenant %s moved to a dedicated node pool", tenant.Spec.TenantID))
 	}
 
 	tenant.Status.State = decision.state
@@ -156,11 +172,45 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: updating status: %w", req.NamespacedName, err)
 	}
 
+	// Recorded only after Status().Update succeeds: if the update fails,
+	// the requeued retry re-observes the same oldState and must detect the
+	// same transition again, not skip it as already-recorded.
+	if decision.state != oldState {
+		r.recordTransition(&tenant, string(decision.state), eventTypeForState(decision.state),
+			fmt.Sprintf("Tenant %s transitioned from %q to %q", tenant.Spec.TenantID, oldState, decision.state))
+	}
+
 	requeueInterval := r.RequeueInterval
 	if requeueInterval <= 0 {
 		requeueInterval = 30 * time.Second
 	}
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// recordTransition emits a Kubernetes Event via r.Recorder and increments
+// r.Metrics's isolation-transitions counter for reason. Both are optional
+// (nil Recorder/Metrics skip their half), and the Event is the secondary
+// audit trail — the counter is the primary Grafana/Alertmanager signal
+// (see #58, ADR 0007).
+func (r *TradingTenantReconciler) recordTransition(tenant *tradingv1alpha1.TradingTenant, reason, eventType, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(tenant, eventType, reason, message)
+	}
+	if r.Metrics != nil {
+		r.Metrics.observeIsolationTransition(reason)
+	}
+}
+
+// eventTypeForState reports Isolated and Degraded as Warning events, since
+// both indicate a tenant needs attention; Stable and Scaling are routine
+// operation and reported as Normal.
+func eventTypeForState(state tradingv1alpha1.TradingTenantState) string {
+	switch state {
+	case tradingv1alpha1.TradingTenantStateIsolated, tradingv1alpha1.TradingTenantStateDegraded:
+		return corev1.EventTypeWarning
+	default:
+		return corev1.EventTypeNormal
+	}
 }
 
 // classify implements the decision table in docs/DESIGN-operator.md,
