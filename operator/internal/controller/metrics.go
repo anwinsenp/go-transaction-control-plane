@@ -26,17 +26,22 @@ var reconcileDurationBucketsSeconds = []float64{ //nolint:gochecknoglobals // re
 
 // isolationTransitionReasons are the fixed, known values of the
 // tradingtenant_isolation_transitions_total counter's "transition" label: the
-// four TradingTenantState values plus DedicatedPoolCreated, the isolation
-// spec update that isn't itself a status.state value. All five are
-// pre-cached via WithLabelValues in NewMetrics, so this is the single
-// source of truth for what's low-cardinality here (see #58 and CLAUDE.md's
-// no-high-cardinality-labels rule — no raw tenant ID is ever attached).
+// four TradingTenantState values, DedicatedPoolCreated (the isolation spec
+// update that isn't itself a status.state value), and
+// DedicatedPoolProvisioned/DedicatedPoolTornDown (the dedicated
+// Deployment/Service/ConfigMap actually being created or deleted, see
+// #55). All seven are pre-cached via WithLabelValues in NewMetrics, so
+// this is the single source of truth for what's low-cardinality here (see
+// #58 and CLAUDE.md's no-high-cardinality-labels rule — no raw tenant ID
+// is ever attached).
 var isolationTransitionReasons = []string{ //nolint:gochecknoglobals // read-only lookup table, never mutated after package init
 	string(tradingv1alpha1.TradingTenantStateStable),
 	string(tradingv1alpha1.TradingTenantStateScaling),
 	string(tradingv1alpha1.TradingTenantStateIsolated),
 	string(tradingv1alpha1.TradingTenantStateDegraded),
 	reasonDedicatedPoolCreated,
+	reasonDedicatedPoolProvisioned,
+	reasonDedicatedPoolTornDown,
 }
 
 // Metrics holds the Prometheus instruments reported for the TradingTenant

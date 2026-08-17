@@ -141,7 +141,11 @@ func run() error {
 		metricsServerErrors <- nil
 	}()
 
-	log.Printf("processor consuming topic %q as group %q, routing failures to %q after %d retries", kafkaConfig.Topic, kafkaConfig.GroupID, kafkaConfig.DLQTopic, kafkaConfig.MaxRetries)
+	if len(kafkaConfig.ManualPartitions) > 0 {
+		log.Printf("processor consuming topic %q via manual partition assignment %v, routing failures to %q after %d retries", kafkaConfig.Topic, kafkaConfig.ManualPartitions, kafkaConfig.DLQTopic, kafkaConfig.MaxRetries)
+	} else {
+		log.Printf("processor consuming topic %q as group %q, routing failures to %q after %d retries", kafkaConfig.Topic, kafkaConfig.GroupID, kafkaConfig.DLQTopic, kafkaConfig.MaxRetries)
+	}
 	consumeErr := consumer.Run(runCtx)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

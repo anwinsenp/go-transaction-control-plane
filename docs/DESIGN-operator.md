@@ -204,6 +204,25 @@ and increment a low-cardinality
 rationale, the partition reservation scheme, and the ingress-routing
 prerequisite are in [ADR 0007](decisions/0007-automated-tenant-isolation.md).
 
+## De-isolation and dedicated resource teardown
+
+`isolation.dedicatedNodePool` never auto-reverts (see above), so reverting
+it back to `false` is always a deliberate, manual operational action —
+typically `kubectl patch` or `kubectl edit` against the `TradingTenant`'s
+spec. That manual revert is not itself a Kubernetes garbage-collection
+trigger: the dedicated Deployment/Service/ConfigMap are owned by the
+`TradingTenant` (via `ownerReferences`), so they're only GC'd if the
+`TradingTenant` object itself is deleted, not on a spec field change. The
+reconciler therefore treats a `false` value as an explicit teardown signal
+on every pass: it get-or-deletes the same four dedicated resources
+`ensureDedicatedPool` get-or-creates, so a tenant reverted out of isolation
+doesn't leave orphaned Deployments/Services/ConfigMaps running (and
+billing) on the dedicated node pool indefinitely. Teardown is idempotent
+the same way provisioning is — deleting an already-absent resource is a
+no-op, not an error — and only emits the `DedicatedPoolTornDown` event and
+counter increment the first pass that actually deletes something, mirroring
+`DedicatedPoolProvisioned`'s create-only signal.
+
 ## Testing approach
 
 Tests use `controller-runtime`'s fake client with one case per decision

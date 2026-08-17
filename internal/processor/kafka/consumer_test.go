@@ -818,6 +818,102 @@ func TestConfigFromEnvInvalidMaxRetries(t *testing.T) {
 	}
 }
 
+// TestConfigFromEnvManualPartitionsOverride confirms KAFKA_MANUAL_PARTITIONS
+// is parsed into Config.ManualPartitions and, per validate()'s relaxed rule
+// for this case, ConfigFromEnv succeeds even with no KAFKA_CONSUMER_GROUP
+// set.
+func TestConfigFromEnvManualPartitionsOverride(t *testing.T) {
+	t.Setenv("KAFKA_MANUAL_PARTITIONS", "0, 1,2")
+
+	config, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() error = %v, want nil", err)
+	}
+
+	wantPartitions := []int32{0, 1, 2}
+	if len(config.ManualPartitions) != len(wantPartitions) {
+		t.Fatalf("ManualPartitions = %v, want %v", config.ManualPartitions, wantPartitions)
+	}
+	for i, partition := range wantPartitions {
+		if config.ManualPartitions[i] != partition {
+			t.Errorf("ManualPartitions[%d] = %d, want %d", i, config.ManualPartitions[i], partition)
+		}
+	}
+}
+
+func TestConfigFromEnvInvalidManualPartitions(t *testing.T) {
+	t.Setenv("KAFKA_MANUAL_PARTITIONS", "0,not-a-number")
+
+	_, err := ConfigFromEnv()
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("ConfigFromEnv() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+func TestParsePartitionList(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    []int32
+		wantErr bool
+	}{
+		{
+			name:  "single value",
+			value: "0",
+			want:  []int32{0},
+		},
+		{
+			name:  "multiple comma-separated values",
+			value: "0,1,2",
+			want:  []int32{0, 1, 2},
+		},
+		{
+			name:  "whitespace around entries is trimmed",
+			value: " 0 , 1 ,2 ",
+			want:  []int32{0, 1, 2},
+		},
+		{
+			name:    "empty string is not a valid partition",
+			value:   "",
+			wantErr: true,
+		},
+		{
+			name:    "negative partition is rejected",
+			value:   "0,-1",
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric entry is rejected",
+			value:   "0,abc",
+			wantErr: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := parsePartitionList(testCase.value)
+
+			if testCase.wantErr {
+				if err == nil {
+					t.Fatalf("parsePartitionList(%q) error = nil, want non-nil", testCase.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePartitionList(%q) error = %v, want nil", testCase.value, err)
+			}
+			if len(got) != len(testCase.want) {
+				t.Fatalf("parsePartitionList(%q) = %v, want %v", testCase.value, got, testCase.want)
+			}
+			for i, partition := range testCase.want {
+				if got[i] != partition {
+					t.Errorf("parsePartitionList(%q)[%d] = %d, want %d", testCase.value, i, got[i], partition)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -869,6 +965,22 @@ func TestConfigValidateAcceptsZeroMaxRetries(t *testing.T) {
 	}
 }
 
+// TestConfigValidateManualPartitionsAllowsBlankGroupID confirms a non-empty
+// ManualPartitions relaxes the otherwise-required GroupID check, since a
+// manually-assigned consumer never joins a consumer group.
+func TestConfigValidateManualPartitionsAllowsBlankGroupID(t *testing.T) {
+	config := Config{
+		Brokers:          []string{"localhost:9092"},
+		Topic:            "t",
+		DLQTopic:         "dlq",
+		ManualPartitions: []int32{0, 1},
+	}
+
+	if err := config.validate(); err != nil {
+		t.Errorf("validate() error = %v, want nil", err)
+	}
+}
+
 func TestNewConsumerRejectsInvalidConfig(t *testing.T) {
 	if _, err := NewConsumer(Config{}, &fakeReconciler{}, prometheus.NewRegistry(), nil); !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("NewConsumer() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
@@ -909,6 +1021,29 @@ func TestNewConsumerValidConfig(t *testing.T) {
 		Topic:    "transaction-events",
 		GroupID:  "processor",
 		DLQTopic: "transaction-events-dlq",
+	}
+
+	consumer, err := NewConsumer(config, &fakeReconciler{}, prometheus.NewRegistry(), nil)
+	if err != nil {
+		t.Fatalf("NewConsumer() error = %v, want nil", err)
+	}
+	defer consumer.Close()
+
+	if consumer.topic != config.Topic {
+		t.Errorf("consumer.topic = %q, want %q", consumer.topic, config.Topic)
+	}
+}
+
+// TestNewConsumerValidConfigWithManualPartitions mirrors
+// TestNewConsumerValidConfig but exercises the ManualPartitions branch (no
+// GroupID, kgo.ConsumePartitions instead of kgo.ConsumerGroup), confirming
+// it also builds a usable Consumer without dialing a broker.
+func TestNewConsumerValidConfigWithManualPartitions(t *testing.T) {
+	config := Config{
+		Brokers:          []string{"127.0.0.1:9"},
+		Topic:            "transaction-events",
+		DLQTopic:         "transaction-events-dlq",
+		ManualPartitions: []int32{0, 1, 2},
 	}
 
 	consumer, err := NewConsumer(config, &fakeReconciler{}, prometheus.NewRegistry(), nil)

@@ -49,6 +49,14 @@ type Config struct {
 	// reconciliation gets after its first failure before it's routed to
 	// DLQTopic instead. Zero means a single attempt with no retries.
 	MaxRetries int
+	// ManualPartitions, when non-empty, switches the consumer from
+	// consumer-group subscription to manual partition assignment (each
+	// listed partition is read from its start), so a dedicated
+	// single-tenant processor pins itself to exactly its tenant's reserved
+	// partitions instead of joining a shared group and triggering
+	// rebalances (see ADR 0007, part 2 / operator issue #55). GroupID is
+	// ignored when this is set.
+	ManualPartitions []int32
 }
 
 // LocalConfig returns consumer settings sized for the docker-compose local
@@ -67,8 +75,11 @@ func LocalConfig() Config {
 // ConfigFromEnv resolves a Config from KAFKA_BROKERS (comma-separated,
 // defaults to LocalConfig's single local broker), KAFKA_TOPIC (defaults to
 // "transaction-events"), KAFKA_CONSUMER_GROUP (defaults to "processor"),
-// KAFKA_DLQ_TOPIC (defaults to "transaction-events-dlq"), and
-// KAFKA_MAX_RETRIES (a non-negative integer, defaults to 3).
+// KAFKA_DLQ_TOPIC (defaults to "transaction-events-dlq"),
+// KAFKA_MAX_RETRIES (a non-negative integer, defaults to 3), and
+// KAFKA_MANUAL_PARTITIONS (comma-separated partition indices; when set,
+// switches the consumer to manual partition assignment and KAFKA_CONSUMER_GROUP
+// is ignored).
 func ConfigFromEnv() (Config, error) {
 	config := LocalConfig()
 
@@ -91,11 +102,36 @@ func ConfigFromEnv() (Config, error) {
 		}
 		config.MaxRetries = parsed
 	}
+	if manualPartitions := os.Getenv("KAFKA_MANUAL_PARTITIONS"); manualPartitions != "" {
+		parsed, err := parsePartitionList(manualPartitions)
+		if err != nil {
+			return Config{}, fmt.Errorf("%w: parse KAFKA_MANUAL_PARTITIONS: %w", ErrInvalidConfig, err)
+		}
+		config.ManualPartitions = parsed
+	}
 
 	if err := config.validate(); err != nil {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// parsePartitionList parses a comma-separated list of non-negative
+// partition indices, e.g. "0,1,2".
+func parsePartitionList(value string) ([]int32, error) {
+	fields := strings.Split(value, ",")
+	partitions := make([]int32, 0, len(fields))
+	for _, field := range fields {
+		parsed, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil {
+			return nil, fmt.Errorf("parse partition %q: %w", field, err)
+		}
+		if parsed < 0 {
+			return nil, fmt.Errorf("partition %d must not be negative", parsed)
+		}
+		partitions = append(partitions, int32(parsed))
+	}
+	return partitions, nil
 }
 
 func (cfg Config) validate() error {
@@ -110,7 +146,7 @@ func (cfg Config) validate() error {
 	if strings.TrimSpace(cfg.Topic) == "" {
 		return fmt.Errorf("%w: topic must not be blank", ErrInvalidConfig)
 	}
-	if strings.TrimSpace(cfg.GroupID) == "" {
+	if len(cfg.ManualPartitions) == 0 && strings.TrimSpace(cfg.GroupID) == "" {
 		return fmt.Errorf("%w: group ID must not be blank", ErrInvalidConfig)
 	}
 	if strings.TrimSpace(cfg.DLQTopic) == "" {
@@ -172,12 +208,23 @@ func NewConsumer(cfg Config, rec reconciler, reg prometheus.Registerer, knownTen
 		return nil, fmt.Errorf("new kafka consumer: %w", err)
 	}
 
-	kafkaClient, err := kgo.NewClient(
+	clientOpts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID("processor"),
-		kgo.ConsumeTopics(cfg.Topic),
-		kgo.ConsumerGroup(cfg.GroupID),
-	)
+	}
+	if len(cfg.ManualPartitions) > 0 {
+		partitionOffsets := make(map[int32]kgo.Offset, len(cfg.ManualPartitions))
+		for _, partition := range cfg.ManualPartitions {
+			partitionOffsets[partition] = kgo.NewOffset().AtStart()
+		}
+		clientOpts = append(clientOpts, kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+			cfg.Topic: partitionOffsets,
+		}))
+	} else {
+		clientOpts = append(clientOpts, kgo.ConsumeTopics(cfg.Topic), kgo.ConsumerGroup(cfg.GroupID))
+	}
+
+	kafkaClient, err := kgo.NewClient(clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("new kafka consumer: create client: %w", err)
 	}

@@ -15,6 +15,7 @@ import (
 type Metrics struct {
 	tenantReservationDroppedTotal prometheus.Counter
 	partitionCount                *prometheus.GaugeVec
+	partitionStart                *prometheus.GaugeVec
 	knownTenants                  metrics.KnownTenants
 }
 
@@ -40,19 +41,31 @@ func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*
 		return nil, fmt.Errorf("new kafka metrics: %w", err)
 	}
 
+	partitionStart, err := metrics.NewGauge(reg, prometheus.GaugeOpts{
+		Name: "ingestion_kafka_tenant_partition_start_count",
+		Help: "Start index (inclusive) of the contiguous partition range reserved for a tenant in the tenant->partition reservation table (ADR 0007), by tenant. Read by the operator to configure the dedicated processor's manual partition assignment.",
+	}, "tenant")
+	if err != nil {
+		return nil, fmt.Errorf("new kafka metrics: %w", err)
+	}
+
 	return &Metrics{
 		tenantReservationDroppedTotal: tenantReservationDropped.WithLabelValues(),
 		partitionCount:                partitionCount,
+		partitionStart:                partitionStart,
 		knownTenants:                  knownTenants,
 	}, nil
 }
 
-// observePartitionCount reports count as tenantID's resolved label's current
-// partition-count gauge value. Called only when a tenant's reservation range
-// is first established (an explicit reservation at table-build time, or a
-// pool assignment on first sight of that tenant) — never on the per-record
+// observePartitionRange reports tenantID's resolved label's current
+// partition-count and partition-start gauge values for its reserved range
+// [start, start+count). Called only when a tenant's reservation range is
+// first established (an explicit reservation at table-build time, or a pool
+// assignment on first sight of that tenant) — never on the per-record
 // Partition() hot path — so it never affects the publisher's zero-allocation
 // steady state.
-func (reportedMetrics *Metrics) observePartitionCount(tenantID string, count int32) {
-	reportedMetrics.partitionCount.WithLabelValues(reportedMetrics.knownTenants.TenantLabel(tenantID)).Set(float64(count))
+func (reportedMetrics *Metrics) observePartitionRange(tenantID string, start, count int32) {
+	label := reportedMetrics.knownTenants.TenantLabel(tenantID)
+	reportedMetrics.partitionCount.WithLabelValues(label).Set(float64(count))
+	reportedMetrics.partitionStart.WithLabelValues(label).Set(float64(start))
 }

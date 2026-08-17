@@ -27,6 +27,7 @@ const (
 	kafkaLagMetric         = "processor_kafka_consumer_lag_messages"
 	latencyBucketMetric    = "processor_transaction_duration_seconds_bucket"
 	partitionCountMetric   = "ingestion_kafka_tenant_partition_count"
+	partitionStartMetric   = "ingestion_kafka_tenant_partition_start_count"
 	latencyQuantileWindow  = "5m"
 	latencySecondsToMillis = 1000
 )
@@ -156,6 +157,23 @@ func (client *Client) ObservedPartitionCount(ctx context.Context, label TenantLa
 	rounded := math.Round(value)
 	if rounded > math.MaxInt32 || rounded < math.MinInt32 {
 		return 0, fmt.Errorf("promquery: observed partition count: value %v out of range", value)
+	}
+	return int32(rounded), nil
+}
+
+// ObservedPartitionStart returns the start index (inclusive) of the
+// tenant's most recently scraped reserved Kafka partition range, used to
+// configure the dedicated processor's manual partition assignment.
+func (client *Client) ObservedPartitionStart(ctx context.Context, label TenantLabel) (int32, error) {
+	query := fmt.Sprintf("%s{%s}", partitionStartMetric, label.matcher())
+
+	value, err := client.queryScalar(ctx, query)
+	if err != nil {
+		return 0, fmt.Errorf("promquery: observed partition start: %w", err)
+	}
+	rounded := math.Round(value)
+	if rounded > math.MaxInt32 || rounded < math.MinInt32 {
+		return 0, fmt.Errorf("promquery: observed partition start: value %v out of range", value)
 	}
 	return int32(rounded), nil
 }

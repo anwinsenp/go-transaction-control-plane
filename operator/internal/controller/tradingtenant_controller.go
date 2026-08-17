@@ -25,6 +25,17 @@ import (
 // it's a spec update, not a status.state value (see #58).
 const reasonDedicatedPoolCreated = "DedicatedPoolCreated"
 
+// reasonDedicatedPoolProvisioned and reasonDedicatedPoolTornDown are the
+// Event reason and isolation-transition counter labels for the dedicated
+// Deployment/Service/ConfigMap actually being created or deleted (see
+// #55, ensureDedicatedPool/tearDownDedicatedPool) — distinct from
+// reasonDedicatedPoolCreated, which fires once on the spec flag flip
+// itself, before any resource exists.
+const (
+	reasonDedicatedPoolProvisioned = "DedicatedPoolProvisioned"
+	reasonDedicatedPoolTornDown    = "DedicatedPoolTornDown"
+)
+
 // defaultTenantLabelName matches the "tenant" label every per-tenant gauge
 // in this repo actually uses (see internal/metrics.KnownTenants and its
 // callers in internal/ingestion/kafka and internal/processor/kafka) — not
@@ -39,6 +50,11 @@ type TenantObserver interface {
 	ObservedKafkaLag(ctx context.Context, label promquery.TenantLabel) (int64, error)
 	ObservedP99Ms(ctx context.Context, label promquery.TenantLabel) (int32, error)
 	ObservedPartitionCount(ctx context.Context, label promquery.TenantLabel) (int32, error)
+	// ObservedPartitionStart returns the start index of the tenant's
+	// reserved Kafka partition range, used to configure the dedicated
+	// processor's manual partition assignment when the tenant is isolated
+	// (see ensureDedicatedPool).
+	ObservedPartitionStart(ctx context.Context, label promquery.TenantLabel) (int32, error)
 }
 
 // TradingTenantReconciler reconciles a TradingTenant object.
@@ -73,6 +89,34 @@ type TradingTenantReconciler struct {
 	// (see #58), the secondary audit trail alongside the Metrics counter.
 	// Optional: nil skips emitting Events.
 	Recorder record.EventRecorder
+
+	// IngestionImage and ProcessorImage are the container images used for
+	// the dedicated ingestion/processor Deployments created once a tenant
+	// is isolated (see #55, ensureDedicatedPool). Required if any tenant
+	// this reconciler manages can reach the isolation branch.
+	IngestionImage string
+	ProcessorImage string
+
+	// IngestionEnvFrom and ProcessorEnvFrom are applied to the dedicated
+	// Deployments' containers via envFrom, supplying the baseline
+	// config/secrets (KAFKA_BROKERS, DATABASE_URL, etc.) every ingestion
+	// or processor instance needs — the same ConfigMap/Secret references
+	// the shared-pool Deployments use, so isolated tenants stay on
+	// identical connection config. The dedicated processor's
+	// ProcessorEnvFrom always gets one more source appended at build time:
+	// the per-tenant ConfigMap carrying its manual partition assignment
+	// (see ensureDedicatedConfigMap).
+	IngestionEnvFrom []corev1.EnvFromSource
+	ProcessorEnvFrom []corev1.EnvFromSource
+
+	// DedicatedNodeSelector and DedicatedTolerations target the dedicated
+	// node pool that isolated tenants' Deployments are scheduled onto (see
+	// #55, ensureDedicatedPool). Both are applied verbatim to every
+	// dedicated Deployment this reconciler creates; leaving them unset
+	// schedules onto any node, which defeats the point of isolation but
+	// doesn't break idempotency, so it's not validated here.
+	DedicatedNodeSelector map[string]string
+	DedicatedTolerations  []corev1.Toleration
 }
 
 // reconcileDecision is the outcome of classifying one tenant's observed
@@ -159,6 +203,35 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		r.recordTransition(&tenant, reasonDedicatedPoolCreated, corev1.EventTypeNormal,
 			fmt.Sprintf("Tenant %s moved to a dedicated node pool", tenant.Spec.TenantID))
+	}
+
+	// Dedicated resource provisioning/teardown is driven off the
+	// (possibly just-flipped) spec flag, not decision.state, since state
+	// stays Isolated on every subsequent pass (classify's alreadyIsolated
+	// branch) while this get-or-create/get-or-delete step must still run
+	// every pass to stay idempotent and to catch a manual de-isolation.
+	if tenant.Spec.Isolation.DedicatedNodePool {
+		partitionStart, err := r.Observer.ObservedPartitionStart(reconcileCtx, label)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: observed partition start: %w", req.NamespacedName, err)
+		}
+		created, err := r.ensureDedicatedPool(reconcileCtx, &tenant, partitionStart, partitionCount, decision.replicas)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: ensuring dedicated pool: %w", req.NamespacedName, err)
+		}
+		if created {
+			r.recordTransition(&tenant, reasonDedicatedPoolProvisioned, corev1.EventTypeNormal,
+				fmt.Sprintf("Dedicated node pool resources provisioned for tenant %s", tenant.Spec.TenantID))
+		}
+	} else {
+		tornDown, err := r.tearDownDedicatedPool(reconcileCtx, &tenant)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: tearing down dedicated pool: %w", req.NamespacedName, err)
+		}
+		if tornDown {
+			r.recordTransition(&tenant, reasonDedicatedPoolTornDown, corev1.EventTypeNormal,
+				fmt.Sprintf("Dedicated node pool resources torn down for tenant %s", tenant.Spec.TenantID))
+		}
 	}
 
 	tenant.Status.State = decision.state

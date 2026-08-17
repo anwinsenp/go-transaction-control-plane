@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +31,7 @@ type fakeObserver struct {
 	lag            int64
 	p99Ms          int32
 	partitionCount int32
+	partitionStart int32
 	err            error
 
 	gotLabels []promquery.TenantLabel
@@ -54,6 +57,13 @@ func (observer *fakeObserver) ObservedPartitionCount(ctx context.Context, label 
 		return 0, observer.err
 	}
 	return observer.partitionCount, nil
+}
+
+func (observer *fakeObserver) ObservedPartitionStart(ctx context.Context, label promquery.TenantLabel) (int32, error) {
+	if observer.err != nil {
+		return 0, observer.err
+	}
+	return observer.partitionStart, nil
 }
 
 func newTestTenant() *tradingv1alpha1.TradingTenant {
@@ -87,19 +97,27 @@ func newTestScheme(t *testing.T) *runtime.Scheme {
 	if err := tradingv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
 	return scheme
 }
 
 func newReconciler(t *testing.T, tenant *tradingv1alpha1.TradingTenant, observer TenantObserver) (*TradingTenantReconciler, client.Client) {
 	t.Helper()
+	scheme := newTestScheme(t)
 	fakeClient := fake.NewClientBuilder().
-		WithScheme(newTestScheme(t)).
+		WithScheme(scheme).
 		WithStatusSubresource(&tradingv1alpha1.TradingTenant{}).
 		WithObjects(tenant).
 		Build()
 
 	reconciler := &TradingTenantReconciler{
 		Client:   fakeClient,
+		Scheme:   scheme,
 		Observer: observer,
 	}
 	return reconciler, fakeClient
@@ -595,14 +613,20 @@ func TestReconcile_DedicatedPoolCreatedFiresOnce(t *testing.T) {
 	}
 
 	firstPassEvents := drainFakeRecorderEvents(recorder)
-	if len(firstPassEvents) != 1 {
-		t.Fatalf("events after first Reconcile = %v, want exactly 1 (DedicatedPoolCreated)", firstPassEvents)
+	if len(firstPassEvents) != 2 {
+		t.Fatalf("events after first Reconcile = %v, want exactly 2 (DedicatedPoolCreated, DedicatedPoolProvisioned)", firstPassEvents)
 	}
 	if !strings.Contains(firstPassEvents[0], reasonDedicatedPoolCreated) {
-		t.Errorf("event = %q, want it to contain reason %q", firstPassEvents[0], reasonDedicatedPoolCreated)
+		t.Errorf("event[0] = %q, want it to contain reason %q", firstPassEvents[0], reasonDedicatedPoolCreated)
+	}
+	if !strings.Contains(firstPassEvents[1], reasonDedicatedPoolProvisioned) {
+		t.Errorf("event[1] = %q, want it to contain reason %q", firstPassEvents[1], reasonDedicatedPoolProvisioned)
 	}
 	if got := sampleCountForIsolationLabel(t, registry, reasonDedicatedPoolCreated); got != 1 {
 		t.Errorf("isolation transition count for state=%s after first Reconcile = %v, want 1", reasonDedicatedPoolCreated, got)
+	}
+	if got := sampleCountForIsolationLabel(t, registry, reasonDedicatedPoolProvisioned); got != 1 {
+		t.Errorf("isolation transition count for state=%s after first Reconcile = %v, want 1", reasonDedicatedPoolProvisioned, got)
 	}
 
 	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {

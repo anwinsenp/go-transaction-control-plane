@@ -262,6 +262,8 @@ func TestNewReservationTableReportsExplicitPartitionCounts(t *testing.T) {
 	scraped := scrapeMetrics(t, registry)
 	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-a"} 2`)
 	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-b"} 3`)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_start_count{tenant="tenant-a"} 0`)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_start_count{tenant="tenant-b"} 2`)
 }
 
 // TestReservationTablePoolRangeForReportsPartitionCountOnFirstAssignment
@@ -282,10 +284,12 @@ func TestReservationTablePoolRangeForReportsPartitionCountOnFirstAssignment(t *t
 	table.poolRangeFor([]byte("tenant-c"))
 	scraped := scrapeMetrics(t, registry)
 	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-c"} 1`)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_start_count{tenant="tenant-c"} 2`)
 
 	table.poolRangeFor([]byte("tenant-c"))
 	scraped = scrapeMetrics(t, registry)
 	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_count{tenant="tenant-c"} 1`)
+	requireMetricsLine(t, scraped, `ingestion_kafka_tenant_partition_start_count{tenant="tenant-c"} 2`)
 }
 
 func TestSplitPartitionKey(t *testing.T) {

@@ -116,6 +116,35 @@ func TestObservedPartitionCount(t *testing.T) {
 	}
 }
 
+func TestObservedPartitionStart(t *testing.T) {
+	fake := &fakeQueryAPI{result: vectorOf(3)}
+	client := &Client{queryAPI: fake, timeout: time.Second}
+
+	start, err := client.ObservedPartitionStart(context.Background(), TenantLabel{Name: "tenant", Value: "acme"})
+	if err != nil {
+		t.Fatalf("ObservedPartitionStart returned error: %v", err)
+	}
+	if start != 3 {
+		t.Errorf("start = %d, want 3", start)
+	}
+
+	wantQuery := `ingestion_kafka_tenant_partition_start_count{tenant="acme"}`
+	if fake.gotQuery != wantQuery {
+		t.Errorf("query = %q, want %q", fake.gotQuery, wantQuery)
+	}
+}
+
+func TestObservedPartitionStart_OutOfRange(t *testing.T) {
+	fake := &fakeQueryAPI{result: vectorOf(math.MaxInt32 * 4.0)}
+	client := &Client{queryAPI: fake, timeout: time.Second}
+
+	if _, err := client.ObservedPartitionStart(context.Background(), TenantLabel{Name: "tenant", Value: "acme"}); err == nil {
+		t.Fatal("expected an error for an out-of-range value, got nil")
+	} else if !strings.Contains(err.Error(), "out of range") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "out of range")
+	}
+}
+
 func TestObservedKafkaLag_OutOfRange(t *testing.T) {
 	fake := &fakeQueryAPI{result: vectorOf(math.MaxInt64 * 4.0)}
 	client := &Client{queryAPI: fake, timeout: time.Second}

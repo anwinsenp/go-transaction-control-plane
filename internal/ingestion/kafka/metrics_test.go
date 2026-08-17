@@ -100,33 +100,39 @@ func TestTenantTopicPartitionerPartitionReportsDroppedTenants(t *testing.T) {
 	requireMetricsLine(t, scraped, "ingestion_kafka_tenant_reservation_dropped_total 1")
 }
 
-// TestMetricsObservePartitionCount confirms observePartitionCount resolves
+// TestMetricsObservePartitionRange confirms observePartitionRange resolves
 // tenantID through knownTenants before labeling
-// ingestion_kafka_tenant_partition_count, the same resolution contract
-// processor/kafka's observeLag already follows.
-func TestMetricsObservePartitionCount(t *testing.T) {
+// ingestion_kafka_tenant_partition_count and ingestion_kafka_tenant_partition_start,
+// the same resolution contract processor/kafka's observeLag already follows.
+func TestMetricsObservePartitionRange(t *testing.T) {
 	testCases := []struct {
 		name         string
 		knownTenants metrics.KnownTenants
 		tenantID     string
+		start        int32
 		count        int32
 		wantLabel    string
+		wantStart    int32
 		wantCount    int32
 	}{
 		{
 			name:         "known tenant is labeled verbatim",
 			knownTenants: metrics.NewKnownTenants("tenant-1"),
 			tenantID:     "tenant-1",
+			start:        8,
 			count:        4,
 			wantLabel:    "tenant-1",
+			wantStart:    8,
 			wantCount:    4,
 		},
 		{
 			name:         "unknown tenant falls back to UnknownTenantLabel",
 			knownTenants: metrics.NewKnownTenants("tenant-1"),
 			tenantID:     "tenant-unregistered",
+			start:        0,
 			count:        2,
 			wantLabel:    metrics.UnknownTenantLabel,
+			wantStart:    0,
 			wantCount:    2,
 		},
 	}
@@ -139,10 +145,11 @@ func TestMetricsObservePartitionCount(t *testing.T) {
 				t.Fatalf("NewMetrics() unexpected error: %v", err)
 			}
 
-			kafkaMetrics.observePartitionCount(testCase.tenantID, testCase.count)
+			kafkaMetrics.observePartitionRange(testCase.tenantID, testCase.start, testCase.count)
 
 			scraped := scrapeMetrics(t, registry)
 			requireMetricsLine(t, scraped, fmt.Sprintf(`ingestion_kafka_tenant_partition_count{tenant="%s"} %d`, testCase.wantLabel, testCase.wantCount))
+			requireMetricsLine(t, scraped, fmt.Sprintf(`ingestion_kafka_tenant_partition_start_count{tenant="%s"} %d`, testCase.wantLabel, testCase.wantStart))
 		})
 	}
 }

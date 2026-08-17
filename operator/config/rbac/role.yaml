@@ -1,0 +1,57 @@
+# Hand-written to match the +kubebuilder:rbac markers in
+# internal/controller/tradingtenant_controller.go and
+# internal/controller/dedicated_pool.go, since this repo has no
+# controller-gen binary available to regenerate it automatically (see
+# operator/Makefile's manifests target, which only emits the CRD today).
+# Re-run `controller-gen rbac:roleName=manager-role paths="./..." output:rbac:artifacts:config=config/rbac`
+# from /operator once controller-gen is available, and diff its output
+# against this file rather than trusting this file blindly.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tradingtenant.controlplane.anwinsenp.dev
+  resources:
+  - tradingtenants
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tradingtenant.controlplane.anwinsenp.dev
+  resources:
+  - tradingtenants/status
+  verbs:
+  - get
+  - patch
+  - update

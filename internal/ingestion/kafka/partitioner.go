@@ -196,7 +196,7 @@ func newReservationTable(reserved TenantPartitionConfig, defaultSize, totalParti
 		}
 		explicit[tenantID] = partitionRange{start: cursor, size: size}
 		if reportedMetrics != nil {
-			reportedMetrics.observePartitionCount(tenantID, size)
+			reportedMetrics.observePartitionRange(tenantID, cursor, size)
 		}
 		cursor += size
 	}
@@ -258,7 +258,7 @@ func (table *reservationTable) poolRangeFor(tenantID []byte) partitionRange {
 	table.poolNext += size
 	table.pool[string(tenantID)] = rng
 	if table.metrics != nil {
-		table.metrics.observePartitionCount(string(tenantID), rng.size)
+		table.metrics.observePartitionRange(string(tenantID), rng.start, rng.size)
 	}
 	return rng
 }
