@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 // ErrInvalidConfig indicates a Config failed validation.
@@ -148,14 +150,25 @@ type Consumer struct {
 	dlqTopic   string
 	maxRetries int
 	rec        reconciler
+	metrics    *Metrics
 }
 
 // NewConsumer builds a Consumer connected to the brokers in cfg, joined to
 // cfg.GroupID and subscribed to cfg.Topic. Every decoded record is handed to
 // rec for idempotent reconciliation; records that fail past cfg.MaxRetries
-// are published to cfg.DLQTopic.
-func NewConsumer(cfg Config, rec reconciler) (*Consumer, error) {
+// are published to cfg.DLQTopic. reg registers this consumer's Kafka-level
+// metrics (see NewMetrics); knownTenants bounds which tenant IDs the
+// consumer lag gauge reports verbatim (see metrics.KnownTenants).
+func NewConsumer(cfg Config, rec reconciler, reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*Consumer, error) {
 	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("new kafka consumer: %w", err)
+	}
+	if reg == nil {
+		return nil, fmt.Errorf("new kafka consumer: reg must not be nil")
+	}
+
+	consumerMetrics, err := NewMetrics(reg, knownTenants)
+	if err != nil {
 		return nil, fmt.Errorf("new kafka consumer: %w", err)
 	}
 
@@ -175,6 +188,7 @@ func NewConsumer(cfg Config, rec reconciler) (*Consumer, error) {
 		dlqTopic:   cfg.DLQTopic,
 		maxRetries: cfg.MaxRetries,
 		rec:        rec,
+		metrics:    consumerMetrics,
 	}, nil
 }
 
@@ -308,6 +322,18 @@ func (con *Consumer) reconcileWithRetry(ctx context.Context, txn ledger.Transact
 // canceled; that in-flight failure is a symptom of shutdown, not a genuine
 // fault, so it's treated as one below rather than aborting Run with an
 // error.
+//
+// Records are processed per partition (rather than via a flat per-record
+// iteration) so each partition's fetch response's HighWatermark is
+// available once its records are handled, to report consumer lag —
+// HighWatermark minus the last processed record's offset — on
+// con.metrics's lag gauge, labeled by that batch's last decoded record's
+// tenant. Per kgo.Fetches.EachPartition's contract a partition can appear
+// more than once within a single PollFetches call (spread across several
+// broker responses); the lag gauge is a Set, not additive, so an
+// out-of-order second visit within the same poll can leave a momentarily
+// stale value until the next poll's report supersedes it — harmless for a
+// gauge scraped on a normal interval.
 func (con *Consumer) Run(ctx context.Context) error {
 	for {
 		fetches := con.client.PollFetches(ctx)
@@ -325,27 +351,45 @@ func (con *Consumer) Run(ctx context.Context) error {
 		}
 
 		var dlqErr error
-		fetches.EachRecord(func(record *kgo.Record) {
+		fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
 			if dlqErr != nil {
 				return
 			}
 
-			txn, decodeErr := decodeTransaction(record.Value)
-			if decodeErr != nil {
-				log.Printf("processor: routing undecodable record on topic %q partition %d offset %d to dlq: %v", record.Topic, record.Partition, record.Offset, decodeErr)
-				if err := con.publishToDLQ(ctx, record, decodeErr, 1); err != nil {
-					dlqErr = fmt.Errorf("route undecodable record on topic %q partition %d offset %d to dlq: %w", record.Topic, record.Partition, record.Offset, err)
-				}
-				return
-			}
+			var lastTenantID string
+			var lastOffset int64
+			var sawRecord bool
 
-			attempts, reconcileErr := con.reconcileWithRetry(ctx, txn)
-			if reconcileErr == nil {
-				return
-			}
-			log.Printf("processor: routing event %s to dlq after %d attempt(s): %v", txn.EventID, attempts, reconcileErr)
-			if err := con.publishToDLQ(ctx, record, reconcileErr, attempts); err != nil {
-				dlqErr = fmt.Errorf("route reconcile failure for event %s to dlq: %w", txn.EventID, err)
+			partition.EachRecord(func(record *kgo.Record) {
+				if dlqErr != nil {
+					return
+				}
+				sawRecord = true
+				lastOffset = record.Offset
+
+				txn, decodeErr := decodeTransaction(record.Value)
+				if decodeErr != nil {
+					log.Printf("processor: routing undecodable record on topic %q partition %d offset %d to dlq: %v", record.Topic, record.Partition, record.Offset, decodeErr)
+					if err := con.publishToDLQ(ctx, record, decodeErr, 1); err != nil {
+						dlqErr = fmt.Errorf("route undecodable record on topic %q partition %d offset %d to dlq: %w", record.Topic, record.Partition, record.Offset, err)
+					}
+					return
+				}
+				lastTenantID = txn.TenantID
+
+				attempts, reconcileErr := con.reconcileWithRetry(ctx, txn)
+				if reconcileErr == nil {
+					return
+				}
+				log.Printf("processor: routing event %s to dlq after %d attempt(s): %v", txn.EventID, attempts, reconcileErr)
+				if err := con.publishToDLQ(ctx, record, reconcileErr, attempts); err != nil {
+					dlqErr = fmt.Errorf("route reconcile failure for event %s to dlq: %w", txn.EventID, err)
+				}
+			})
+
+			if sawRecord && con.metrics != nil {
+				lag := partition.HighWatermark - 1 - lastOffset
+				con.metrics.observeLag(lastTenantID, lag)
 			}
 		})
 		if dlqErr != nil {

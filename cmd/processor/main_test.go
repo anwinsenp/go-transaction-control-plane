@@ -15,6 +15,7 @@ func TestRunGracefulShutdown(t *testing.T) {
 	t.Setenv("KAFKA_BROKERS", "127.0.0.1:1")
 	t.Setenv("KAFKA_TOPIC", "transaction-events")
 	t.Setenv("KAFKA_CONSUMER_GROUP", "processor-test")
+	t.Setenv("METRICS_ADDR", "127.0.0.1:0")
 
 	runErrors := make(chan error, 1)
 	go func() {

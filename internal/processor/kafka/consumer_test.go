@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/anwinsenp/go-transaction-control-plane/internal/ledger"
+	"github.com/anwinsenp/go-transaction-control-plane/internal/metrics"
 )
 
 // fakeReconciler is a reconciler test double that records every
@@ -123,6 +125,64 @@ func fetchesWithValidRecords(topic string, count int) kgo.Fetches {
 			Partitions: []kgo.FetchPartition{{
 				Partition: 0,
 				Records:   records,
+			}},
+		}},
+	}}
+}
+
+// validTransactionPayloadForTenant returns a decodable wire payload for
+// tenantID, so lag-reporting tests can control which tenant a partition's
+// last record belongs to.
+func validTransactionPayloadForTenant(tenantID string) []byte {
+	payload, err := json.Marshal(wireEvent{
+		EventID:    "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+		TenantID:   tenantID,
+		Instrument: "AAPL",
+		Side:       "BUY",
+		Quantity:   "10",
+		Price:      "150.5",
+		Currency:   "USD",
+		OccurredAt: "2026-01-02T15:04:05Z",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+// fetchesWithHighWatermarkAndTenants builds a single-partition fetch batch
+// whose records carry tenantIDs in order (offsets 0..len(tenantIDs)-1), so
+// lag-reporting tests can control both the partition's HighWatermark and
+// which tenant the last decoded record belongs to.
+func fetchesWithHighWatermarkAndTenants(topic string, highWatermark int64, tenantIDs ...string) kgo.Fetches {
+	records := make([]*kgo.Record, len(tenantIDs))
+	for i, tenantID := range tenantIDs {
+		records[i] = &kgo.Record{Topic: topic, Offset: int64(i), Value: validTransactionPayloadForTenant(tenantID)}
+	}
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: topic,
+			Partitions: []kgo.FetchPartition{{
+				Partition:     0,
+				HighWatermark: highWatermark,
+				Records:       records,
+			}},
+		}},
+	}}
+}
+
+// fetchesWithEmptyPartition builds a fetch batch containing a partition
+// with a HighWatermark set but zero records, so a lag-reporting test can
+// confirm the gauge is left untouched when there's nothing to report a
+// tenant label for.
+func fetchesWithEmptyPartition(topic string, highWatermark int64) kgo.Fetches {
+	return kgo.Fetches{{
+		Topics: []kgo.FetchTopic{{
+			Topic: topic,
+			Partitions: []kgo.FetchPartition{{
+				Partition:     0,
+				HighWatermark: highWatermark,
+				Records:       nil,
 			}},
 		}},
 	}}
@@ -788,8 +848,32 @@ func TestConfigValidateAcceptsZeroMaxRetries(t *testing.T) {
 }
 
 func TestNewConsumerRejectsInvalidConfig(t *testing.T) {
-	if _, err := NewConsumer(Config{}, &fakeReconciler{}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := NewConsumer(Config{}, &fakeReconciler{}, prometheus.NewRegistry(), nil); !errors.Is(err, ErrInvalidConfig) {
 		t.Errorf("NewConsumer() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+// TestNewConsumerRejectsNilRegistry confirms a nil Registerer is rejected
+// with a specific error message rather than panicking once NewMetrics
+// tries to register against it.
+func TestNewConsumerRejectsNilRegistry(t *testing.T) {
+	config := Config{
+		Brokers:  []string{"127.0.0.1:9"},
+		Topic:    "transaction-events",
+		GroupID:  "processor",
+		DLQTopic: "transaction-events-dlq",
+	}
+
+	consumer, err := NewConsumer(config, &fakeReconciler{}, nil, nil)
+	if err == nil {
+		t.Fatal("NewConsumer() error = nil, want non-nil")
+	}
+	if consumer != nil {
+		t.Errorf("NewConsumer() consumer = %v, want nil on error", consumer)
+	}
+	wantErrMsg := "new kafka consumer: reg must not be nil"
+	if err.Error() != wantErrMsg {
+		t.Errorf("NewConsumer() error = %q, want %q", err.Error(), wantErrMsg)
 	}
 }
 
@@ -805,7 +889,7 @@ func TestNewConsumerValidConfig(t *testing.T) {
 		DLQTopic: "transaction-events-dlq",
 	}
 
-	consumer, err := NewConsumer(config, &fakeReconciler{})
+	consumer, err := NewConsumer(config, &fakeReconciler{}, prometheus.NewRegistry(), nil)
 	if err != nil {
 		t.Fatalf("NewConsumer() error = %v, want nil", err)
 	}
@@ -814,4 +898,71 @@ func TestNewConsumerValidConfig(t *testing.T) {
 	if consumer.topic != config.Topic {
 		t.Errorf("consumer.topic = %q, want %q", consumer.topic, config.Topic)
 	}
+}
+
+// TestConsumerRunReportsConsumerLag drives Run through a single fetch batch
+// on one partition with a known HighWatermark and two records, then
+// confirms the lag gauge on the registry passed to NewMetrics reflects
+// HighWatermark-1-lastOffset, labeled by the partition's last decoded
+// record's tenant.
+func TestConsumerRunReportsConsumerLag(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{
+			fetchesWithHighWatermarkAndTenants("transaction-events", 10, "tenant-1", "tenant-2"),
+			fetchesWithError("transaction-events", 0, brokerErr),
+		},
+	}
+	registry := prometheus.NewRegistry()
+	consumerMetrics, err := NewMetrics(registry, metrics.NewKnownTenants("tenant-2"))
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+	consumer := &Consumer{
+		client:  fake,
+		topic:   "transaction-events",
+		rec:     &fakeReconciler{},
+		metrics: consumerMetrics,
+	}
+
+	if err := consumer.Run(context.Background()); !errors.Is(err, brokerErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, brokerErr)
+	}
+
+	// Two records at offsets 0 and 1: last offset is 1, HighWatermark is 10,
+	// so lag = 10 - 1 - 1 = 8, labeled by the last record's tenant (tenant-2).
+	scraped := scrapeMetrics(t, registry)
+	requireMetricsLine(t, scraped, `processor_kafka_consumer_lag_messages{tenant="tenant-2"} 8`)
+	requireMetricsLineAbsent(t, scraped, `processor_kafka_consumer_lag_messages{tenant="tenant-1"}`)
+}
+
+// TestConsumerRunEmptyPartitionSkipsLagGauge confirms a partition fetch
+// with zero records leaves the lag gauge untouched: no series is created,
+// since there's no last-decoded-record tenant to label it with.
+func TestConsumerRunEmptyPartitionSkipsLagGauge(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{
+			fetchesWithEmptyPartition("transaction-events", 10),
+			fetchesWithError("transaction-events", 0, brokerErr),
+		},
+	}
+	registry := prometheus.NewRegistry()
+	consumerMetrics, err := NewMetrics(registry, nil)
+	if err != nil {
+		t.Fatalf("NewMetrics() unexpected error: %v", err)
+	}
+	consumer := &Consumer{
+		client:  fake,
+		topic:   "transaction-events",
+		rec:     &fakeReconciler{},
+		metrics: consumerMetrics,
+	}
+
+	if err := consumer.Run(context.Background()); !errors.Is(err, brokerErr) {
+		t.Fatalf("Run() error = %v, want it to wrap %v", err, brokerErr)
+	}
+
+	scraped := scrapeMetrics(t, registry)
+	requireMetricsLineAbsent(t, scraped, "processor_kafka_consumer_lag_messages{")
 }
