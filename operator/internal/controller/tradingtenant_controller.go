@@ -17,7 +17,11 @@ import (
 	"github.com/anwinsenp/go-transaction-control-plane/operator/internal/promquery"
 )
 
-const defaultTenantLabelName = "tenant_id"
+// defaultTenantLabelName matches the "tenant" label every per-tenant gauge
+// in this repo actually uses (see internal/metrics.KnownTenants and its
+// callers in internal/ingestion/kafka and internal/processor/kafka) — not
+// "tenant_id".
+const defaultTenantLabelName = "tenant"
 
 // TenantObserver reads a tenant's current Kafka lag, P99 processing
 // latency, and topic partition count from Prometheus, scoped by a
@@ -39,7 +43,7 @@ type TradingTenantReconciler struct {
 	Observer TenantObserver
 
 	// TenantLabelName is the Prometheus label key used to scope
-	// Observer queries to one tenant. Defaults to "tenant_id" if unset.
+	// Observer queries to one tenant. Defaults to "tenant" if unset.
 	TenantLabelName string
 
 	// ReconcileTimeout bounds the entire reconcile pass's external calls:

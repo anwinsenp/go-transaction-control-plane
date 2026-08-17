@@ -24,12 +24,9 @@ const (
 	addressEnvVar = "PROMETHEUS_ADDR"
 	timeoutEnvVar = "PROMETHEUS_QUERY_TIMEOUT"
 
-	// These metric names/label-scoping approach are placeholders pending
-	// #23/#25/#42, which define the processor's and operator's actual
-	// Prometheus instrumentation. Update alongside those once they land.
 	kafkaLagMetric         = "processor_kafka_consumer_lag_messages"
 	latencyBucketMetric    = "processor_transaction_duration_seconds_bucket"
-	partitionCountMetric   = "kafka_tenant_partition_count"
+	partitionCountMetric   = "ingestion_kafka_tenant_partition_count"
 	latencyQuantileWindow  = "5m"
 	latencySecondsToMillis = 1000
 )

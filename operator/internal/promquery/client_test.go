@@ -110,7 +110,7 @@ func TestObservedPartitionCount(t *testing.T) {
 		t.Errorf("count = %d, want 6", count)
 	}
 
-	wantQuery := `kafka_tenant_partition_count{tenant="acme"}`
+	wantQuery := `ingestion_kafka_tenant_partition_count{tenant="acme"}`
 	if fake.gotQuery != wantQuery {
 		t.Errorf("query = %q, want %q", fake.gotQuery, wantQuery)
 	}
