@@ -212,6 +212,9 @@ pause_processor() {
 # timeout here just fails this attempt; the caller's retry loop moves on to
 # the next one rather than the whole script hanging.
 burst_load() {
+	# shellcheck disable=SC2016 # single-quoted on purpose: $TENANT/$COUNT/$CONCURRENCY
+	# and the loop's own $i/$batch_end must expand inside the remote pod's sh,
+	# not this local shell — the vars are passed in via --env, not interpolated here.
 	if ! run_with_timeout 180 kubectl run isolation-demo-loadgen --rm -i --restart=Never --image=curlimages/curl:8.11.1 -n "$app_namespace" \
 		--env="TENANT=${tenant}" --env="COUNT=${load_request_count}" --env="CONCURRENCY=${load_concurrency}" -- \
 		sh -c '
