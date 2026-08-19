@@ -139,3 +139,6 @@ kind-verify:
 
 kind-verify-isolation:
 	@bash deploy/kind/verify-isolation.sh
+
+kind-verify-fault-injection:
+	@bash deploy/kind/verify-fault-injection.sh

@@ -10,10 +10,13 @@ tenant-aware scaling, and Prometheus/Grafana telemetry.
 **Status:** Complete. The full stack (Strimzi Kafka, CloudNativePG Postgres,
 kube-prometheus-stack, ingestion, processor, and the TradingTenant operator)
 deploys and runs end-to-end on a local Kind cluster — see
-[Local development](#local-development) — and has been verified under
-sustained load, with a working noisy-tenant isolation demo. See
-[Architecture](docs/ARCHITECTURE.md) for the full design and
-[Load test results](#load-test-results) for numbers from a real run.
+[Local development](#local-development) — and has been verified under load
+and under fault injection (Postgres outage, DLQ routing), with a working
+noisy-tenant isolation demo. See [Architecture](docs/ARCHITECTURE.md) for
+the full design, [Load test results](#load-test-results) for numbers from a
+real run (single client, single partition — see that section for what
+changes at higher throughput), and
+[Fault injection](#fault-injection) for the failure-path demo.
 
 **Stack:** Go · Kafka (Strimzi) · PostgreSQL (self-hosted, in-cluster) ·
 Kubernetes (`controller-runtime`) · Prometheus/Grafana · Kind (local dev)
@@ -132,6 +135,19 @@ histogram_quantile(0.99, sum(rate(processor_transaction_duration_seconds_bucket{
 | Processor outcome | 100% success (0 failures, 0 DLQ routes) |
 | Kafka consumer lag | drained to 0 within seconds of the burst ending — the single-partition, single-consumer processor kept pace with ingestion at this rate |
 
+**What limits this past ~40 req/s:** `tenant-a` gets exactly one partition
+(`DefaultPartitionsPerTenant`, `internal/ingestion/kafka/partitioner.go`) and
+one processor consumer, both by design for an unreserved tenant — see
+[`TenantPartitionConfig`](internal/ingestion/kafka/partitioner.go) and
+[operator design](docs/DESIGN-operator.md). That single partition, not
+ingestion or Postgres, is the ceiling: throughput past this point comes from
+reserving more partitions for a tenant (`TenantPartitionConfig`) and running
+more processor replicas consuming them in parallel — exactly what the
+`TradingTenant` operator's dedicated pool does automatically once a tenant's
+Kafka lag crosses `kafkaLagThreshold` (see the isolation demo below). This
+run intentionally stayed under that threshold to show the default,
+unscaled path; the isolation demo below shows the scaled one.
+
 Screenshots from the Grafana dashboard (`deploy/grafana/dashboard.json`)
 covering this and the isolation demo below:
 
@@ -205,6 +221,64 @@ kubectl patch tradingtenant/tenant-b -n transaction-control-plane --type merge \
   -p '{"spec":{"isolation":{"dedicatedNodePool":false}}}'
 kubectl delete tradingtenant/tenant-b -n transaction-control-plane
 ```
+
+### Fault injection
+
+The load test above ran happy-path only — 100% success, 0 DLQ routes, 0
+circuit breaker trips. `deploy/kind/verify-fault-injection.sh` exercises the
+failure paths documented in
+[Processor design](docs/DESIGN-processor.md) against a live cluster instead:
+
+```
+make kind-verify-fault-injection
+```
+
+1. fences the live Postgres instance via CNPG's `cnpg.io/fencedInstances`
+   annotation (shuts down the `postgres` process in place, pod and data
+   untouched — a real, reversible outage, not a mock) and confirms the pod
+   actually reports not-ready
+2. bursts transactions for `tenant-a` at the now-Postgres-less processor
+3. asserts `processor_postgres_circuit_breaker_state{repository="transactions"}`
+   (`internal/ledger/breaker.go`'s `TransactionRepositoryBreaker`, wrapping
+   every reconcile's Postgres call) actually reaches Open, not just that
+   requests start failing
+4. asserts the failed records actually land on the `transaction-events-dlq`
+   Kafka topic (checked via the broker's own `kafka-get-offsets.sh`, since
+   there's no DLQ-specific Prometheus counter today — see the Roadmap below)
+5. unfences Postgres, waits out the breaker's `OpenTimeout`, and asserts the
+   breaker recovers to Closed on its own via the standard half-open probe
+   (`corebreaker.Machine`) — not just that a later request happens to succeed
+
+A real run: the breaker went Closed → Open → Closed across the fence/unfence
+cycle, and `transaction-events-dlq`'s message count rose by 30 (one per
+transaction sent while fenced) each of two runs. This chart is real
+Prometheus data queried straight from that run's
+`processor_postgres_circuit_breaker_state` time series (not a manual Grafana
+screenshot — this Kind deployment doesn't have the `grafana-image-renderer`
+plugin installed, so panel screenshots have to be taken by hand; see
+`deploy/grafana/README.md` if you want to reproduce one interactively):
+
+![Processor-to-Postgres circuit breaker state over a real fault-injection run: closed, then open for ~40s while Postgres is fenced, then closed again](docs/images/fault-injection-breaker-state.svg)
+
+## Roadmap
+
+Genuine remaining gaps, tracked as open issues rather than claimed as done:
+
+- **[#53](https://github.com/anwinsenp/go-transaction-control-plane/issues/53)
+  Processor: commit Kafka offsets only after successful reconciliation.**
+  The consumer currently relies on franz-go's default background
+  auto-commit, which can advance the committed offset for a record that's
+  still being reconciled (or that failed and is mid-DLQ-route), not
+  strictly after it. Fixing this means disabling auto-commit and committing
+  explicitly once a record's outcome (reconciled or routed to DLQ) is known.
+- **[#57](https://github.com/anwinsenp/go-transaction-control-plane/issues/57)
+  Ingress: tenant-aware routing to dedicated ingestion pool.** Dedicated
+  per-tenant ingestion Deployments exist once a tenant is isolated (see
+  the isolation demo above), but nothing routes external traffic to them
+  by tenant yet — today they're reached the same way as the shared pool.
+- **[#40](https://github.com/anwinsenp/go-transaction-control-plane/issues/40)
+  Repo meta files.** LICENSE is present; CONTRIBUTING.md, issue/PR
+  templates, and documented branch-protection notes are still missing.
 
 ## License
 
