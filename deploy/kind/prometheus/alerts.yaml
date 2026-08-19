@@ -1,0 +1,64 @@
+# PrometheusRule implementing the alert conditions documented in
+# docs/RUNBOOK-operator-alerts.md. Each alert here fires off
+# tradingtenant_isolation_transitions_total{transition}, the operator's
+# per-reconcile-pass state-transition counter (operator/internal/controller/
+# metrics.go) — it has no "tenant" label (CLAUDE.md's no-high-cardinality
+# rule), so these alerts are cluster-wide ("some tenant transitioned"), not
+# scoped to which tenant. Check status.state on the TradingTenant objects to
+# find which one.
+#
+# TenantAtMaxReplicasWithGrowingLag has no exact source metric: the operator
+# doesn't export maxReplicas or a per-tenant "still lagging" duration as a
+# metric. It's approximated here as repeated Scaling transitions within a
+# window without the tenant settling back to Stable — a real
+# TenantAtMaxReplicasWithGrowingLag would show exactly this pattern (the
+# reconciler keeps re-entering the Scaling branch every pass because lag
+# never drops below threshold), but so would a tenant genuinely still
+# ramping within its scaling headroom, so treat this one as a hint to check
+# manually rather than a page-worthy signal.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tradingtenant-operator
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: tradingtenant.rules
+    rules:
+    - alert: TenantScalingEvent
+      expr: increase(tradingtenant_isolation_transitions_total{transition="Scaling"}[5m]) > 0
+      for: 1m
+      labels:
+        severity: info
+      annotations:
+        summary: "A tenant was scaled in response to rising lag/latency"
+        runbook_url: "https://github.com/anwinsenp/go-transaction-control-plane/blob/main/docs/RUNBOOK-operator-alerts.md#tenantscalingevent"
+
+    - alert: TenantAtMaxReplicasWithGrowingLag
+      expr: increase(tradingtenant_isolation_transitions_total{transition="Scaling"}[15m]) > 2
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "A tenant kept re-entering the Scaling branch without settling — approximate signal, verify against status.state/observedKafkaLag before acting"
+        runbook_url: "https://github.com/anwinsenp/go-transaction-control-plane/blob/main/docs/RUNBOOK-operator-alerts.md#tenantatmaxreplicaswithgrowinglag"
+
+    - alert: TenantIsolatedNoisyNeighborSuspected
+      expr: increase(tradingtenant_isolation_transitions_total{transition="Isolated"}[5m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "A tenant was moved to a dedicated node pool: high lag, normal latency, at partition parity"
+        runbook_url: "https://github.com/anwinsenp/go-transaction-control-plane/blob/main/docs/RUNBOOK-operator-alerts.md#tenantisolatednoisyneighborsuspected"
+
+    - alert: TenantDegradedDownstreamBottleneck
+      expr: increase(tradingtenant_isolation_transitions_total{transition="Degraded"}[5m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "A tenant has high P99 latency with normal lag — likely a downstream (Postgres) bottleneck, not something scaling fixes"
+        runbook_url: "https://github.com/anwinsenp/go-transaction-control-plane/blob/main/docs/RUNBOOK-operator-alerts.md#tenantdegradeddownstreambottleneck"

@@ -44,3 +44,4 @@ means picking the one datasource already listed.
 | TradingTenant Reconcile Duration (P50/P99) | `tradingtenant_reconcile_duration_seconds` |
 | Circuit Breaker State (Ingestion→Kafka, Processor→Postgres) | `ingestion_kafka_circuit_breaker_state`, `processor_postgres_circuit_breaker_state` |
 | TradingTenant Isolation Transitions | `tradingtenant_isolation_transitions_total` |
+| Active Operator Alerts | `ALERTS` (from `deploy/kind/prometheus/alerts.yaml`'s `PrometheusRule`) |

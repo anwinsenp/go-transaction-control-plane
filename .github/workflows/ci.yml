@@ -110,7 +110,7 @@ jobs:
           directory: deploy/kind
 
       - name: shellcheck
-        run: shellcheck deploy/kind/verify.sh
+        run: shellcheck deploy/kind/verify.sh deploy/kind/verify-isolation.sh
 
   proto-compat:
     runs-on: ubuntu-latest

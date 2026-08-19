@@ -3,7 +3,7 @@ MIGRATIONS_PATH := internal/ledger/storage/migrations
 KIND_CLUSTER_NAME := transaction-control-plane
 
 .PHONY: migrate migrate-up migrate-down check-migrate-cli check-buf-cli proto-lint proto-breaking proto-generate \
-	kind-up kind-down kind-load kind-deploy kind-verify \
+	kind-up kind-down kind-load kind-deploy kind-verify kind-verify-isolation \
 	check-kind-cli check-docker-cli check-helm-cli
 
 check-buf-cli:
@@ -57,9 +57,17 @@ migrate-down: check-migrate-cli
 #                    tradingtenant_reconcile_duration_seconds{result="success"}
 #                    actually increased off the back of it — see
 #                    deploy/kind/verify.sh
+# make kind-verify-isolation
+#                    drives tenant-b into the operator's Isolated
+#                    (noisy-neighbor, dedicated-node-pool) state with a load
+#                    burst, and asserts the dedicated pool, isolation
+#                    transition metric, and TenantIsolatedNoisyNeighborSuspected
+#                    alert all actually fired — see deploy/kind/verify-isolation.sh.
+#                    Leaves the isolated tenant running for a live Grafana/
+#                    Prometheus demo; run after kind-verify, not instead of it.
 # make kind-down    tears the cluster down
 #
-# Typical flow: make kind-up kind-load kind-deploy kind-verify
+# Typical flow: make kind-up kind-load kind-deploy kind-verify kind-verify-isolation
 
 check-kind-cli:
 	@command -v kind >/dev/null 2>&1 || { \
@@ -123,7 +131,11 @@ kind-deploy: check-helm-cli
 	kubectl apply -k deploy/kind/operator
 	kubectl wait deployment/controller-manager -n tradingtenant-operator-system --for=condition=Available --timeout=180s
 	kubectl apply -f deploy/kind/prometheus/servicemonitors.yaml
+	kubectl apply -f deploy/kind/prometheus/alerts.yaml
 	kubectl apply -f operator/config/samples/tradingtenant_v1alpha1_tradingtenant.yaml -n transaction-control-plane
 
 kind-verify:
 	@bash deploy/kind/verify.sh
+
+kind-verify-isolation:
+	@bash deploy/kind/verify-isolation.sh

@@ -1,0 +1,30 @@
+# A second TradingTenant, reusing tenant-b (already listed in
+# INGESTION_KNOWN_TENANTS/PROCESSOR_KNOWN_TENANTS, see
+# deploy/kind/{ingestion,processor}/configmap.yaml — an unlisted tenant ID
+# would report under metrics.UnknownTenantLabel and the operator's
+# promquery filters would never find it). minReplicas == maxReplicas == 1
+# pins baseline (see classify() in
+# operator/internal/controller/tradingtenant_controller.go) at exactly 1,
+# which already equals an unreserved pool tenant's default single Kafka
+# partition (internal/ingestion/kafka/partitioner.go's
+# DefaultPartitionsPerTenant). So the very first reconcile pass where lag
+# exceeds kafkaLagThreshold while p99 latency stays under
+# p99LatencyThresholdMs lands directly in the Isolated branch — no
+# intermediate Scaling state to wait through. kafkaLagThreshold is set low
+# (20) so a short load burst (see deploy/kind/verify-isolation.sh) reliably
+# crosses it; p99LatencyThresholdMs is set generously high (5000ms) so nothing
+# about generating that burst trips the latency branch instead.
+apiVersion: tradingtenant.controlplane.anwinsenp.dev/v1alpha1
+kind: TradingTenant
+metadata:
+  name: tenant-b
+spec:
+  tenantID: tenant-b
+  minReplicas: 1
+  maxReplicas: 1
+  resources:
+    cpuRequest: "250m"
+    memoryRequest: "256Mi"
+  scaling:
+    kafkaLagThreshold: 20
+    p99LatencyThresholdMs: 5000

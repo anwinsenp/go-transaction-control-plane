@@ -300,6 +300,32 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "row",
+      "title": "Alerts",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 },
+      "id": 106,
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Active Operator Alerts",
+      "description": "ALERTS from deploy/kind/prometheus/alerts.yaml's PrometheusRule (TenantScalingEvent, TenantAtMaxReplicasWithGrowingLag, TenantIsolatedNoisyNeighborSuspected, TenantDegradedDownstreamBottleneck) currently pending or firing. Alertmanager is not deployed in this Kind environment, so these are Prometheus's own rule-evaluation state, not routed notifications; see deploy/kind/prometheus/values.yaml.",
+      "id": 11,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 55 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "ALERTS{alertname=~\"TenantScalingEvent|TenantAtMaxReplicasWithGrowingLag|TenantIsolatedNoisyNeighborSuspected|TenantDegradedDownstreamBottleneck\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
     }
   ],
   "templating": {

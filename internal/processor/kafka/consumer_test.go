@@ -41,20 +41,22 @@ func (fake *fakeReconciler) Reconcile(ctx context.Context, txn ledger.Transactio
 }
 
 // fakeConsumerClient is a client test double that returns caller-configured
-// fetches/errors on each PollFetches call and records every record handed
+// fetches/errors on each PollRecords call and records every record handed
 // to ProduceSync, so Consumer's behavior — including DLQ routing — can be
 // tested without a live Kafka broker.
 type fakeConsumerClient struct {
-	fetches    []kgo.Fetches
-	call       int
-	closed     bool
-	produced   []*kgo.Record
-	produceErr error
-	added      []map[string]map[int32]kgo.Offset
-	removed    []map[string][]int32
+	fetches            []kgo.Fetches
+	call               int
+	closed             bool
+	produced           []*kgo.Record
+	produceErr         error
+	added              []map[string]map[int32]kgo.Offset
+	removed            []map[string][]int32
+	maxPollRecordsSeen []int
 }
 
-func (fake *fakeConsumerClient) PollFetches(ctx context.Context) kgo.Fetches {
+func (fake *fakeConsumerClient) PollRecords(ctx context.Context, maxPollRecords int) kgo.Fetches {
+	fake.maxPollRecordsSeen = append(fake.maxPollRecordsSeen, maxPollRecords)
 	if fake.call < len(fake.fetches) {
 		fetches := fake.fetches[fake.call]
 		fake.call++
@@ -697,6 +699,34 @@ func TestConsumerRunMultipleFetchesIncludingEmpty(t *testing.T) {
 	}
 }
 
+// TestConsumerRunPassesMaxPollRecords confirms Run forwards
+// Consumer.maxPollRecords through to every PollRecords call, rather than
+// always polling unbounded — this is what makes Config.MaxPollRecords
+// actually take effect at runtime.
+func TestConsumerRunPassesMaxPollRecords(t *testing.T) {
+	brokerErr := errors.New("broker unavailable")
+	fake := &fakeConsumerClient{
+		fetches: []kgo.Fetches{
+			fetchesWithRecords("transaction-events", 2),
+			fetchesWithError("transaction-events", 0, brokerErr),
+		},
+	}
+	consumer := &Consumer{client: fake, topic: "transaction-events", rec: &fakeReconciler{}, maxPollRecords: 50}
+
+	if err := consumer.Run(context.Background()); !errors.Is(err, brokerErr) {
+		t.Errorf("Run() error = %v, want it to wrap %v", err, brokerErr)
+	}
+
+	if len(fake.maxPollRecordsSeen) != 2 {
+		t.Fatalf("PollRecords called %d times, want 2", len(fake.maxPollRecordsSeen))
+	}
+	for i, got := range fake.maxPollRecordsSeen {
+		if got != 50 {
+			t.Errorf("PollRecords call %d maxPollRecords = %d, want 50", i, got)
+		}
+	}
+}
+
 func TestConsumerRunWrapsBrokerFetchError(t *testing.T) {
 	brokerErr := errors.New("broker unavailable")
 	fake := &fakeConsumerClient{
@@ -818,6 +848,9 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	if config.MaxRetries != want.MaxRetries {
 		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, want.MaxRetries)
 	}
+	if config.MaxPollRecords != 0 {
+		t.Errorf("MaxPollRecords = %d, want 0 (unlimited)", config.MaxPollRecords)
+	}
 }
 
 func TestConfigFromEnvOverrides(t *testing.T) {
@@ -826,6 +859,7 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("KAFKA_CONSUMER_GROUP", "custom-group")
 	t.Setenv("KAFKA_DLQ_TOPIC", "custom-events-dlq")
 	t.Setenv("KAFKA_MAX_RETRIES", "5")
+	t.Setenv("KAFKA_MAX_POLL_RECORDS", "50")
 
 	config, err := ConfigFromEnv()
 	if err != nil {
@@ -852,6 +886,9 @@ func TestConfigFromEnvOverrides(t *testing.T) {
 	}
 	if config.MaxRetries != 5 {
 		t.Errorf("MaxRetries = %d, want %d", config.MaxRetries, 5)
+	}
+	if config.MaxPollRecords != 50 {
+		t.Errorf("MaxPollRecords = %d, want %d", config.MaxPollRecords, 50)
 	}
 }
 
@@ -895,6 +932,24 @@ func TestConfigFromEnvInvalidBrokers(t *testing.T) {
 
 func TestConfigFromEnvInvalidMaxRetries(t *testing.T) {
 	t.Setenv("KAFKA_MAX_RETRIES", "not-a-number")
+
+	_, err := ConfigFromEnv()
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("ConfigFromEnv() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+func TestConfigFromEnvInvalidMaxPollRecords(t *testing.T) {
+	t.Setenv("KAFKA_MAX_POLL_RECORDS", "not-a-number")
+
+	_, err := ConfigFromEnv()
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("ConfigFromEnv() error = %v, want errors.Is(err, ErrInvalidConfig)", err)
+	}
+}
+
+func TestConfigFromEnvNegativeMaxPollRecords(t *testing.T) {
+	t.Setenv("KAFKA_MAX_POLL_RECORDS", "-1")
 
 	_, err := ConfigFromEnv()
 	if !errors.Is(err, ErrInvalidConfig) {

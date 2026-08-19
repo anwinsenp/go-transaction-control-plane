@@ -75,6 +75,18 @@ type Config struct {
 	// polled. Zero uses DefaultTenantPartitionReloadInterval. Ignored if
 	// TenantPartitionSource is nil.
 	TenantPartitionReloadInterval time.Duration
+	// MaxPollRecords caps how many records a single PollFetches call in
+	// Run returns (see kgo.Client.PollRecords), across all of this
+	// consumer's partitions combined. Zero means unlimited: kgo buffers
+	// and returns everything it has fetched so far in one call, which is
+	// the right default for throughput. A consumer catching up on a large
+	// backlog then drains it in one pass, and the consumer lag gauge (see
+	// Metrics, observeLag) jumps straight from its pre-backlog value to
+	// caught-up-again without ever reporting the backlog in between — set
+	// this to a small positive value only where that in-between visibility
+	// matters more than raw throughput (e.g. local demo/CI environments
+	// exercising the operator's lag-based isolation decision).
+	MaxPollRecords int
 }
 
 // LocalConfig returns consumer settings sized for the docker-compose local
@@ -102,6 +114,8 @@ func LocalConfig() Config {
 // TENANT_ID, enables hot-reloading the manual partition assignment from
 // that file path (ADR 0007, part 3); TENANT_PARTITION_RELOAD_INTERVAL (a
 // time.ParseDuration string) controls how often it's polled.
+// KAFKA_MAX_POLL_RECORDS (a non-negative integer, defaults to 0/unlimited)
+// sets Config.MaxPollRecords.
 func ConfigFromEnv() (Config, error) {
 	config := LocalConfig()
 
@@ -139,6 +153,13 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if err := overrideDurationFromEnv("TENANT_PARTITION_RELOAD_INTERVAL", &config.TenantPartitionReloadInterval); err != nil {
 		return Config{}, err
+	}
+	if maxPollRecords := os.Getenv("KAFKA_MAX_POLL_RECORDS"); maxPollRecords != "" {
+		parsed, err := strconv.Atoi(maxPollRecords)
+		if err != nil {
+			return Config{}, fmt.Errorf("%w: parse KAFKA_MAX_POLL_RECORDS: %w", ErrInvalidConfig, err)
+		}
+		config.MaxPollRecords = parsed
 	}
 
 	if err := config.validate(); err != nil {
@@ -201,6 +222,9 @@ func (cfg Config) validate() error {
 	if cfg.MaxRetries < 0 {
 		return fmt.Errorf("%w: MaxRetries must not be negative", ErrInvalidConfig)
 	}
+	if cfg.MaxPollRecords < 0 {
+		return fmt.Errorf("%w: MaxPollRecords must not be negative", ErrInvalidConfig)
+	}
 	if cfg.TenantPartitionSource != nil && (len(cfg.ManualPartitions) == 0 || strings.TrimSpace(cfg.TenantID) == "") {
 		return fmt.Errorf("%w: TenantPartitionSource requires ManualPartitions and TenantID to be set", ErrInvalidConfig)
 	}
@@ -209,11 +233,13 @@ func (cfg Config) validate() error {
 
 // kafkaClient is the subset of *kgo.Client that Consumer depends on, so
 // tests can substitute a fake without a live Kafka broker. It covers both
-// consuming (PollFetches) and producing (ProduceSync), since Consumer
+// consuming (PollRecords) and producing (ProduceSync), since Consumer
 // reuses its single Kafka connection to publish failed records to the DLQ
 // topic rather than opening a second client.
 type kafkaClient interface {
-	PollFetches(ctx context.Context) kgo.Fetches
+	// PollRecords behaves like *kgo.Client.PollRecords: maxPollRecords <= 0
+	// means unlimited (equivalent to PollFetches), matching Config.MaxPollRecords.
+	PollRecords(ctx context.Context, maxPollRecords int) kgo.Fetches
 	ProduceSync(ctx context.Context, records ...*kgo.Record) kgo.ProduceResults
 	// AddConsumePartitions and RemoveConsumePartitions let a manually
 	// assigned consumer's partition set change while running, used by
@@ -237,12 +263,13 @@ type reconciler interface {
 // can't be decoded, or whose reconciliation keeps failing past maxRetries,
 // is published to dlqTopic instead of blocking or dropping the record.
 type Consumer struct {
-	client     kafkaClient
-	topic      string
-	dlqTopic   string
-	maxRetries int
-	rec        reconciler
-	metrics    *Metrics
+	client         kafkaClient
+	topic          string
+	dlqTopic       string
+	maxRetries     int
+	maxPollRecords int
+	rec            reconciler
+	metrics        *Metrics
 	// assignment tracks the partitions currently assigned via manual
 	// partition assignment, guarded by assignmentMu since it's read/written
 	// from both the TenantPartitionReloader goroutine (see reload.go) and
@@ -304,13 +331,14 @@ func NewConsumer(cfg Config, rec reconciler, reg prometheus.Registerer, knownTen
 	}
 
 	con := &Consumer{
-		client:     kafkaClient,
-		topic:      cfg.Topic,
-		dlqTopic:   cfg.DLQTopic,
-		maxRetries: cfg.MaxRetries,
-		rec:        rec,
-		metrics:    consumerMetrics,
-		assignment: assignment,
+		client:         kafkaClient,
+		topic:          cfg.Topic,
+		dlqTopic:       cfg.DLQTopic,
+		maxRetries:     cfg.MaxRetries,
+		maxPollRecords: cfg.MaxPollRecords,
+		rec:            rec,
+		metrics:        consumerMetrics,
+		assignment:     assignment,
 	}
 
 	if cfg.TenantPartitionSource != nil {
@@ -484,7 +512,7 @@ func (con *Consumer) reconcileWithRetry(ctx context.Context, txn ledger.Transact
 // accepts.
 func (con *Consumer) Run(ctx context.Context) error {
 	for {
-		fetches := con.client.PollFetches(ctx)
+		fetches := con.client.PollRecords(ctx, con.maxPollRecords)
 
 		if fetchErrs := fetches.Errors(); len(fetchErrs) > 0 {
 			if ctx.Err() != nil {

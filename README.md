@@ -98,6 +98,69 @@ Note that `kind-verify` only sends a single transaction, to see meaningful
 data in the throughput/latency panels you'll want to generate sustained
 traffic against ingestion first.
 
+### Demoing noisy-tenant isolation
+
+```
+make kind-verify-isolation
+```
+
+Drives `TradingTenant/tenant-b` into the operator's `Isolated` state — the
+noisy-neighbor branch of `docs/DESIGN-operator.md`'s decision table, where a
+tenant's Kafka lag is high, latency stays normal, and it's already at
+partition parity with no scaling headroom left — and asserts (not just
+prints) that the whole loop closed:
+
+1. pauses the shared processor (scales it to 0), so `tenant-b` traffic piles
+   up unconsumed — bursting load against a *live* processor doesn't work on
+   a Kind-sized cluster, it drains messages about as fast as ingestion can
+   accept them
+2. bursts thousands of `tenant-b` transactions through ingestion (temporarily
+   raising its rate limit, since the default 50 req/s caps a burst at a
+   couple hundred) while paused, then resumes the processor
+3. on resume, the drain itself has to be observable: `KAFKA_MAX_POLL_RECORDS`
+   is set on the processor (see `internal/processor/kafka/consumer.go`'s
+   `Config.MaxPollRecords`) so it reports lag incrementally instead of
+   draining its whole backlog in one unobserved `PollRecords` call, and its
+   CPU limit is temporarily dropped to 15m so the drain takes long enough for
+   a Prometheus scrape to land inside it — even bounded, this cluster drains
+   thousands of messages in single-digit seconds otherwise. Applies
+   `deploy/kind/isolation-demo-tenant.yaml` (`tenant-b`, tuned via low
+   `kafkaLagThreshold` and `minReplicas == maxReplicas == 1` so the first
+   eligible reconcile lands directly in `Isolated`) right before resuming, not
+   earlier — an object created before real data exists just burns through
+   failed reconciles into exponential backoff. All three changes are reverted
+   once the script exits.
+4. waits for `status.state == "Isolated"`, retrying the whole pause/burst/
+   resume cycle up to 3 times — the exact drain-vs-scrape timing isn't
+   perfectly deterministic run to run
+5. asserts the reconciler's dedicated `tenant-b-dedicated-ingestion` /
+   `tenant-b-dedicated-processor` Deployments actually exist and reach
+   `Available`
+6. asserts `tradingtenant_isolation_transitions_total{transition="Isolated"}`
+   actually increased
+7. asserts the `TenantIsolatedNoisyNeighborSuspected` Prometheus alert
+   (`deploy/kind/prometheus/alerts.yaml`, applied by `kind-deploy`) reaches
+   `alertstate="firing"`
+
+On success it leaves the isolated tenant and its dedicated pool running, so
+you can watch it live: the "TradingTenant Isolation Transitions" and
+"Active Operator Alerts" panels in `deploy/grafana/dashboard.json` (see
+[Visualizing metrics in Grafana](#visualizing-metrics-in-grafana) above),
+and the raw alert at `http://localhost:9090/alerts` via
+`kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090`.
+
+Alertmanager isn't deployed in this Kind environment (see
+`deploy/kind/prometheus/values.yaml`) — the alert reaches `firing` inside
+Prometheus's own rule evaluation, but nothing routes or notifies on it.
+
+To revert (the isolation flag never auto-reverts on its own, by design):
+
+```
+kubectl patch tradingtenant/tenant-b -n transaction-control-plane --type merge \
+  -p '{"spec":{"isolation":{"dedicatedNodePool":false}}}'
+kubectl delete tradingtenant/tenant-b -n transaction-control-plane
+```
+
 ## License
 
 [MIT](LICENSE)
