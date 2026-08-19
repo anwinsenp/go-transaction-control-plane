@@ -52,8 +52,11 @@ migrate-down: check-migrate-cli
 #                    Helm and applies the ingestion/processor/operator
 #                    manifests, in dependency order
 # make kind-verify  sends a sample transaction through the live stack and
-#                    polls until the operator's reconcile-duration metric
-#                    and the sample TradingTenant's status both reflect it
+#                    asserts (non-zero exit on failure, not just prints) that
+#                    the TradingTenant reached a known status.state AND that
+#                    tradingtenant_reconcile_duration_seconds{result="success"}
+#                    actually increased off the back of it — see
+#                    deploy/kind/verify.sh
 # make kind-down    tears the cluster down
 #
 # Typical flow: make kind-up kind-load kind-deploy kind-verify
@@ -117,19 +120,10 @@ kind-deploy: check-helm-cli
 	kubectl apply -k deploy/kind/processor
 	helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
 		-n monitoring --create-namespace -f deploy/kind/prometheus/values.yaml --wait
-	kubectl apply -f deploy/kind/prometheus/servicemonitors.yaml
 	kubectl apply -k deploy/kind/operator
 	kubectl wait deployment/controller-manager -n tradingtenant-operator-system --for=condition=Available --timeout=180s
+	kubectl apply -f deploy/kind/prometheus/servicemonitors.yaml
 	kubectl apply -f operator/config/samples/tradingtenant_v1alpha1_tradingtenant.yaml -n transaction-control-plane
 
 kind-verify:
-	EVENT_ID=$$(uuidgen | tr '[:upper:]' '[:lower:]'); \
-	OCCURRED_AT=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
-	kubectl run curl-verify --rm -i --restart=Never --image=curlimages/curl:8.11.1 -n transaction-control-plane -- \
-		curl -sf -X POST http://ingestion:8080/v1/transactions \
-		-H "Authorization: Bearer kind-local-dev-key" \
-		-H "Content-Type: application/json" \
-		-d "{\"event_id\":\"$$EVENT_ID\",\"tenant_id\":\"tenant-a\",\"instrument\":\"AAPL\",\"side\":\"BUY\",\"quantity\":\"10\",\"price\":\"150.25\",\"currency\":\"USD\",\"occurred_at\":\"$$OCCURRED_AT\"}"
-	kubectl wait tradingtenant/tenant-a -n transaction-control-plane --for=jsonpath='{.status.state}' --timeout=120s
-	kubectl get tradingtenant tenant-a -n transaction-control-plane -o yaml
-	@echo "Check the reconcile-duration histogram at: kubectl port-forward -n tradingtenant-operator-system svc/controller-manager-metrics-service 8080:8080"
+	@bash deploy/kind/verify.sh
