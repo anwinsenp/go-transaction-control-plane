@@ -9,5 +9,5 @@ RUN CGO_ENABLED=0 go build -o /out/processor ./cmd/processor
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /out/processor /usr/local/bin/processor
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/processor"]

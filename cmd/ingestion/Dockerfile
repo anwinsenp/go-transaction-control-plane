@@ -9,5 +9,5 @@ RUN CGO_ENABLED=0 go build -o /out/ingestion ./cmd/ingestion
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /out/ingestion /usr/local/bin/ingestion
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/ingestion"]

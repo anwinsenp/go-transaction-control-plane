@@ -78,6 +78,40 @@ jobs:
         with:
           version: v2.12.2
 
+  lint-infra:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: hadolint (ingestion)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: cmd/ingestion/Dockerfile
+
+      - name: hadolint (processor)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: cmd/processor/Dockerfile
+
+      - name: hadolint (operator)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: operator/Dockerfile
+
+      - name: yamllint
+        run: |
+          pip install --quiet yamllint
+          yamllint -c .yamllint.yml deploy/kind operator/config
+
+      - name: kube-linter
+        uses: stackrox/kube-linter-action@v1
+        with:
+          directory: deploy/kind
+
+      - name: shellcheck
+        run: shellcheck deploy/kind/verify.sh
+
   proto-compat:
     runs-on: ubuntu-latest
     steps:

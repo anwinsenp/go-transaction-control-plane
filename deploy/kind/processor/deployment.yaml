@@ -19,10 +19,18 @@ spec:
       labels:
         app: processor
     spec:
+      securityContext:
+        runAsNonRoot: true
       containers:
       - name: processor
         image: processor:local
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         envFrom:
         - configMapRef:
             name: processor-config

@@ -14,10 +14,18 @@ spec:
       labels:
         app: ingestion
     spec:
+      securityContext:
+        runAsNonRoot: true
       containers:
       - name: ingestion
         image: ingestion:local
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         envFrom:
         - configMapRef:
             name: ingestion-config

@@ -1,0 +1,25 @@
+# yamllint config tuned for this repo's Kubernetes/Kustomize manifests
+# under deploy/kind/ and operator/config/, which follow kubectl's own
+# output convention (list items at the same indent as their parent key,
+# no leading "---" document marker) rather than yamllint's stricter
+# defaults.
+extends: default
+
+rules:
+  # kubectl/kustomize output — and every manifest in this repo — never
+  # leads with "---"; requiring it would fight the ecosystem convention
+  # for no real benefit.
+  document-start: disable
+
+  # List items at the same indent as their parent key ("ports:\n- name:
+  # ...") is standard Kubernetes YAML style, not a mistake.
+  indentation:
+    spaces: consistent
+    indent-sequences: false
+
+  # Long field values (image references, DNS names, PromQL label
+  # matchers) are routine in k8s manifests; flag egregiously long lines
+  # without failing CI over normal ones.
+  line-length:
+    max: 120
+    level: warning
