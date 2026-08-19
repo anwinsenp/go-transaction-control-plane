@@ -1,0 +1,61 @@
+# ServiceMonitors (prometheus-operator CRD, installed by the
+# kube-prometheus-stack chart) that make the in-cluster Prometheus scrape
+# ingestion/processor/operator's /metrics endpoints — the same signals
+# (kafka lag, P99 latency, partition count, reconcile duration) the
+# TradingTenant reconciler queries back out via promquery.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ingestion
+  namespace: transaction-control-plane
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: ingestion
+  namespaceSelector:
+    matchNames:
+    - transaction-control-plane
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: processor
+  namespace: transaction-control-plane
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: processor
+  namespaceSelector:
+    matchNames:
+    - transaction-control-plane
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tradingtenant-operator
+  namespace: tradingtenant-operator-system
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  namespaceSelector:
+    matchNames:
+    - tradingtenant-operator-system
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 10s

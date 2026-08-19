@@ -1,0 +1,12 @@
+# Kind-specific values for the cnpg/cloudnative-pg Helm chart (helm repo:
+# https://cloudnative-pg.github.io/charts). The operator itself needs no
+# environment-specific tuning beyond modest resource requests; the
+# per-environment differences (storage class, instance count) live on the
+# Cluster CR in cluster.yaml instead.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 300m
+    memory: 256Mi

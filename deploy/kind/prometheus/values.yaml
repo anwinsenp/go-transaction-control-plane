@@ -1,0 +1,42 @@
+# Kind-specific values for the prometheus-community/kube-prometheus-stack
+# Helm chart (helm repo: https://prometheus-community.github.io/helm-charts).
+# No ingress/public dashboard here, unlike #35's AWS/k3s-targeted scope —
+# Grafana is reached via `kubectl port-forward` for local use only.
+grafana:
+  service:
+    type: ClusterIP
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+prometheus:
+  prometheusSpec:
+    retention: 6h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    storageSpec: {}
+    # Scrape ServiceMonitors from every namespace: ingestion/processor live
+    # in transaction-control-plane, the operator lives in
+    # tradingtenant-operator-system, not in kube-prometheus-stack's own
+    # release namespace.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelector: {}
+  service:
+    type: NodePort
+    nodePort: 30090
+
+alertmanager:
+  enabled: false

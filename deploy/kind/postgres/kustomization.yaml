@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: postgres
+resources:
+- namespace.yaml
+- cluster.yaml
+# migrate-job.yaml is deliberately not listed here: kustomize's
+# configMapGenerator can't reach files outside this directory
+# (internal/ledger/storage/migrations lives at the repo root, kustomize's
+# load restrictor forbids climbing above the kustomization root), so
+# `make kind-deploy` instead creates the ledger-migrations ConfigMap
+# directly from that directory via `kubectl create configmap
+# --from-file`, then applies migrate-job.yaml once the Cluster is Ready.

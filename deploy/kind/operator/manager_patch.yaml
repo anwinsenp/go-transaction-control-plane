@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        image: operator:local
+        env:
+        - name: PROMETHEUS_ADDR
+          value: "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+        - name: OPERATOR_TENANT_LABEL_NAME
+          value: "tenant"
+        - name: OPERATOR_INGESTION_IMAGE
+          value: "ingestion:local"
+        - name: OPERATOR_PROCESSOR_IMAGE
+          value: "processor:local"
+        - name: OPERATOR_INGESTION_CONFIGMAP_ENV_FROM
+          value: "ingestion-config"
+        - name: OPERATOR_PROCESSOR_CONFIGMAP_ENV_FROM
+          value: "processor-config"

@@ -1,0 +1,15 @@
+# Kind-specific values for the strimzi/strimzi-kafka-operator Helm chart
+# (helm repo: https://strimzi.io/charts/). Reused, not duplicated, when
+# #33 builds the k3s/EC2 chart config: only resource sizing and the
+# watched-namespace list differ between the two environments.
+watchAnyNamespace: false
+watchNamespaces:
+- kafka
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

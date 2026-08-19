@@ -1,0 +1,31 @@
+# Single-instance CloudNativePG cluster sized for Kind (#34's k3s/EC2 chart
+# config reuses this shape with an EBS-backed StorageClass and 2-3
+# instances for HA). owner is deliberately not "postgres": that name
+# collides with CNPG's separately-managed bootstrap superuser role, and the
+# auto-generated <name>-app secret's password isn't reliably applied to it
+# (confirmed live: TCP password auth fails even though the secret's
+# password matches what CNPG wrote). "transactions_app" avoids the
+# collision. DATABASE_URL for ingestion/processor is built from
+# <name>-app's uri key in the root Makefile's kind-deploy target.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: transaction-control-plane
+  namespace: postgres
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  storage:
+    size: 2Gi
+    storageClass: standard
+  bootstrap:
+    initdb:
+      database: transactions
+      owner: transactions_app
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

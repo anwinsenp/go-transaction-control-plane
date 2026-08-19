@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion
+  labels:
+    app: ingestion
+spec:
+  selector:
+    app: ingestion
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    nodePort: 30080
+  - name: grpc
+    port: 9090
+    targetPort: grpc
+  type: NodePort

@@ -1,0 +1,34 @@
+# One-shot schema migration, run by `make kind-deploy` after the Cluster is
+# Ready and before ingestion/processor start. Uses the golang-migrate CLI
+# image directly rather than requiring processor to self-migrate on boot,
+# matching the root Makefile's existing `make migrate` flow.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ledger-migrate
+  namespace: postgres
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: migrate
+        image: migrate/migrate:v4.18.1
+        args:
+        - -path=/migrations
+        - -database=$(DATABASE_URL)
+        - up
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: transaction-control-plane-app
+              key: uri
+        volumeMounts:
+        - name: migrations
+          mountPath: /migrations
+      volumes:
+      - name: migrations
+        configMap:
+          name: ledger-migrations

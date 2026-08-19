@@ -1,0 +1,19 @@
+# Sample TradingTenant used by `make kind-verify` to drive a real
+# end-to-end reconcile pass: tenantID matches INGESTION_KNOWN_TENANTS /
+# PROCESSOR_KNOWN_TENANTS in deploy/kind/{ingestion,processor}/configmap.yaml,
+# so lag/latency/partition signals observed for "tenant-a" traffic show up
+# under this object's reconcile.
+apiVersion: tradingtenant.controlplane.anwinsenp.dev/v1alpha1
+kind: TradingTenant
+metadata:
+  name: tenant-a
+spec:
+  tenantID: tenant-a
+  minReplicas: 1
+  maxReplicas: 3
+  resources:
+    cpuRequest: "250m"
+    memoryRequest: "256Mi"
+  scaling:
+    kafkaLagThreshold: 1000
+    p99LatencyThresholdMs: 500

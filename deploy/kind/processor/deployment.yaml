@@ -1,0 +1,56 @@
+# DATABASE_URL is deliberately not in configmap.yaml: it comes from
+# processor-db-secret, a copy of CloudNativePG's auto-generated
+# transaction-control-plane-app secret (Secrets are namespace-scoped, and
+# that secret lives in the postgres namespace, not transaction-control-plane
+# — see `make kind-deploy`'s db-secret-sync step in the root Makefile).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processor
+  labels:
+    app: processor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: processor
+  template:
+    metadata:
+      labels:
+        app: processor
+    spec:
+      containers:
+      - name: processor
+        image: processor:local
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: processor-config
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: processor-db-secret
+              key: uri
+        ports:
+        - name: metrics
+          containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi

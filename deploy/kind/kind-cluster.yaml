@@ -1,0 +1,22 @@
+# Kind cluster definition for local full-stack development (issue #51).
+# Single control-plane node: Kind's default "standard" StorageClass
+# (rancher local-path-provisioner) is already installed, so no extra
+# storage config is needed here, unlike the EBS-backed StorageClasses used
+# on the k3s/EC2 sandbox (see docs/decisions/0006-postgres-in-cluster.md).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: transaction-control-plane
+nodes:
+- role: control-plane
+  extraPortMappings:
+  # Ingestion HTTP/gRPC and Prometheus, exposed on localhost for curl/
+  # promtool access without a separate port-forward.
+  - containerPort: 30080
+    hostPort: 8080
+    protocol: TCP
+  - containerPort: 30090
+    hostPort: 9090
+    protocol: TCP
+  - containerPort: 30091
+    hostPort: 9091
+    protocol: TCP

@@ -55,3 +55,15 @@ rules:
   - get
   - patch
   - update
+# Not covered by a +kubebuilder:rbac marker in tradingtenant_controller.go
+# (Recorder.Event calls aren't picked up by that codegen), but required
+# now that operator/cmd/main.go wires mgr.GetEventRecorderFor to a real
+# EventRecorder: without it, every isolation-transition Event emitted by
+# recordTransition fails Forbidden and is silently dropped.
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: processor-config
+data:
+  METRICS_ADDR: ":8081"
+  KAFKA_BROKERS: "transaction-control-plane-kafka-bootstrap.kafka.svc:9092"
+  KAFKA_TOPIC: "transaction-events"
+  KAFKA_DLQ_TOPIC: "transaction-events-dlq"
+  KAFKA_CONSUMER_GROUP: "processor"
+  PROCESSOR_KNOWN_TENANTS: "tenant-a,tenant-b"
+  # storage.PoolConfigFromEnv only accepts "local" or "sandbox" (see
+  # internal/ledger/storage/pool.go) — "local"'s small single-instance pool
+  # sizing is the right fit for Kind, there's no third "kind" env value.
+  APP_ENV: "local"
