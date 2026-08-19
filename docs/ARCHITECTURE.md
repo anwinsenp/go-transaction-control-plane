@@ -11,8 +11,8 @@ Demonstrate a distributed, real-time transaction processing engine that
 exercises both financial-systems engineering (correctness, idempotency,
 reconciliation under at-least-once delivery) and cloud-native platform
 engineering (Kubernetes operators, tenant-aware autoscaling, observability),
-deployed to a public sandbox so the system can be inspected end-to-end rather
-than just read as source.
+deployed end-to-end on a local Kind cluster so the system can be inspected
+running rather than just read as source.
 
 ## Goals
 
@@ -23,8 +23,10 @@ than just read as source.
 - A custom Kubernetes operator (`TradingTenant`) that scales and isolates
   tenants based on joint signals, not a single metric.
 - Prometheus/Grafana observability with alerting, not just dashboards.
-- A public sandbox deployment that a reviewer can hit directly, plus a
-  load-test script and documented results from a real run.
+- A local Kind deployment a reviewer can reproduce end-to-end, plus
+  documented results (throughput, P50/P99 latency) from a real load-test
+  run against it — see the README's
+  [Load test results](../README.md#load-test-results).
 
 ## Non-goals
 
@@ -39,7 +41,7 @@ than just read as source.
 
 ```mermaid
 flowchart LR
-    client[Public client] -->|gRPC/REST + API key| ingest[Go ingestion service]
+    client[Client] -->|gRPC/REST + API key| ingest[Go ingestion service]
     ingest -->|publish event| kafka[(Kafka)]
     kafka --> processor[Go transaction processor]
     processor -->|reconciled state| postgres[(Postgres, in-cluster)]
@@ -55,7 +57,7 @@ flowchart LR
 
 ## Data flow
 
-1. A client sends a mock transaction event to the public ingestion endpoint,
+1. A client sends a mock transaction event to the ingestion endpoint,
    authenticated with an API key/bearer token and subject to rate limiting.
 2. The ingestion service validates the payload (malformed requests are
    rejected with 4xx, never silently dropped), then publishes it to Kafka
@@ -108,12 +110,13 @@ flowchart LR
   rest of the stack — see [ADR 0002](decisions/0002-single-custom-operator.md)
   and its superseding [ADR 0006](decisions/0006-postgres-in-cluster.md) for
   why.
-- **Self-hosted k3s on EC2 over managed EKS/ECS.** Running k3s (a lightweight
-  Kubernetes distro) across plain EC2 instances instead of a managed control
-  plane trades operational overhead (patching, upgrades, HA of the control
-  plane are now our responsibility) for meaningfully lower cost — no EKS
-  control-plane fee or Fargate/managed-node-group premium. Kind provides the
-  same Kubernetes surface locally for operator development.
+- **Kind over a public cloud deployment.** The project was originally scoped
+  to include a self-hosted k3s-on-EC2 deployment with a public endpoint
+  (trading the operational overhead of self-managing the control plane for
+  lower cost than managed EKS/ECS). That's been dropped: a local Kind
+  cluster exercises the identical Kubernetes surface — same CRDs, same
+  operator, same Helm charts — end-to-end, without the ongoing cost and
+  maintenance burden of a live public deployment for a portfolio project.
 - **A long-running service over Lambda.** Deploying ingestion as a
   long-running service on the cluster avoids Lambda's cold-start tail
   latency on a hot ingestion path where P99 matters; the trade-off is paying

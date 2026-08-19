@@ -5,20 +5,18 @@
 A distributed, real-time transaction processing engine in Go: a
 zero-allocation ingestion hot path, Kafka-based event streaming, a
 Postgres-backed reconciliation layer, a custom Kubernetes operator for
-tenant-aware scaling, and Prometheus/Grafana telemetry, deployed to a
-public sandbox for demonstration.
+tenant-aware scaling, and Prometheus/Grafana telemetry.
 
-**Status:** Design complete, implementation in progress. See
-[Architecture](docs/ARCHITECTURE.md) for the full design. Code is being
-built incrementally against the tracked issues in this repo. The full stack
-(Strimzi Kafka, CloudNativePG Postgres, kube-prometheus-stack, ingestion,
-processor, and the TradingTenant operator) now deploys and runs end-to-end
-on a local Kind cluster — see [Local development](#local-development). The
-k3s/EC2 sandbox deployment (issues #32-#35) is still open.
+**Status:** Complete. The full stack (Strimzi Kafka, CloudNativePG Postgres,
+kube-prometheus-stack, ingestion, processor, and the TradingTenant operator)
+deploys and runs end-to-end on a local Kind cluster — see
+[Local development](#local-development) — and has been verified under
+sustained load, with a working noisy-tenant isolation demo. See
+[Architecture](docs/ARCHITECTURE.md) for the full design and
+[Load test results](#load-test-results) for numbers from a real run.
 
 **Stack:** Go · Kafka (Strimzi) · PostgreSQL (self-hosted, in-cluster) ·
-Kubernetes (`controller-runtime`) · Prometheus/Grafana · Terraform · AWS
-(self-hosted k3s on EC2, Kind for local dev)
+Kubernetes (`controller-runtime`) · Prometheus/Grafana · Kind (local dev)
 
 ## Documentation
 
@@ -64,9 +62,9 @@ condition isn't met.
 
 Tear the cluster down with `make kind-down`.
 
-This Kind environment is for local development only. The production-style
-deploy target is the k3s cluster on EC2 (issues #32-#35), which is still
-open.
+This Kind cluster is the project's deployment target — see
+[Load test results](#load-test-results) below for numbers from a real run
+against it.
 
 ### Visualizing metrics in Grafana
 
@@ -97,6 +95,51 @@ panel-to-metric table.
 Note that `kind-verify` only sends a single transaction, to see meaningful
 data in the throughput/latency panels you'll want to generate sustained
 traffic against ingestion first.
+
+### Load test results
+
+Numbers below are from a real run against the local Kind cluster, not
+estimates: a single client sent authenticated `POST /v1/transactions`
+requests against `tenant-a` for 60s via a port-forwarded `ingestion` service,
+paced at 40 req/s (just under the default 50 req/s per-API-key rate limit),
+then the exact figures were read back from Prometheus for that window.
+
+```
+kubectl -n transaction-control-plane port-forward svc/ingestion 18081:8080
+
+# 60s @ 40 req/s against tenant-a, one request per line
+for i in $(seq 1 60); do
+  seq 40 | xargs -P 40 -I{} curl -s -o /dev/null -w '%{http_code}\n' \
+    -X POST http://127.0.0.1:18081/v1/transactions \
+    -H "Authorization: Bearer <api-key>" -H "Content-Type: application/json" \
+    -d '{"event_id":"'"$(uuidgen)"'","tenant_id":"tenant-a","instrument":"AAPL","side":"BUY","quantity":"10","price":"150.25","currency":"USD","occurred_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+  sleep 1
+done
+
+# then, against the Prometheus API (port-forwarded on :19090):
+histogram_quantile(0.50, sum(rate(ingestion_publish_latency_seconds_bucket[65s])) by (le))
+histogram_quantile(0.99, sum(rate(ingestion_publish_latency_seconds_bucket[65s])) by (le))
+histogram_quantile(0.50, sum(rate(processor_transaction_duration_seconds_bucket{outcome="success"}[5m])) by (le))
+histogram_quantile(0.99, sum(rate(processor_transaction_duration_seconds_bucket{outcome="success"}[5m])) by (le))
+```
+
+| Metric | Result |
+|---|---|
+| Requests sent | 2,360 over 60s (~39.3 req/s sustained, single client) |
+| Ingestion accept rate | 100% (2,360/2,360 `202 Accepted`, 0 failures) |
+| Ingestion publish latency (Kafka produce, ingestion → Kafka) | P50 ≈ 0.6 ms, P99 ≈ 19.5 ms |
+| Processor reconciliation latency (Kafka → Postgres reconcile) | P50 ≈ 1.6 ms, P99 ≈ 4.5 ms |
+| Processor outcome | 100% success (0 failures, 0 DLQ routes) |
+| Kafka consumer lag | drained to 0 within seconds of the burst ending — the single-partition, single-consumer processor kept pace with ingestion at this rate |
+
+Screenshots from the Grafana dashboard (`deploy/grafana/dashboard.json`)
+covering this and the isolation demo below:
+
+![Ingestion and processor transaction throughput](docs/images/throughput.png)
+![Ingestion publish latency and processor reconciliation latency, P50/P99](docs/images/latency.png)
+![Kafka and Postgres circuit breaker state](docs/images/circuit-breaker-state.png)
+![Operator reconcile duration, P50/P99](docs/images/operator-reconcile-duration.png)
+![Kafka consumer lag and active consumer count](docs/images/kafka-consumer-lag.png)
 
 ### Demoing noisy-tenant isolation
 
@@ -148,6 +191,8 @@ you can watch it live: the "TradingTenant Isolation Transitions" and
 [Visualizing metrics in Grafana](#visualizing-metrics-in-grafana) above),
 and the raw alert at `http://localhost:9090/alerts` via
 `kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090`.
+
+![TradingTenant isolation transitions over an isolation demo run](docs/images/isolation-transitions.png)
 
 Alertmanager isn't deployed in this Kind environment (see
 `deploy/kind/prometheus/values.yaml`) — the alert reaches `firing` inside

@@ -23,8 +23,8 @@ Approach:
      report each result, not abort on the first non-zero exit.
    - A `BASE_URL="${API_BASE_URL:-http://localhost:8080}"` variable at the
      top, so it's overridable — this is what lets the same script run
-     against localhost during development and against the public sandbox
-     endpoint (from the README) for a live demo.
+     against localhost during development and against a port-forwarded or
+     otherwise deployed ingestion service for a live demo.
    - A small helper function to run a request, print the case name, print
      the HTTP status returned, compare it to the expected status, and print
      a clear `PASS`/`FAIL` line — don't just dump raw curl output with no
@@ -48,8 +48,8 @@ Approach:
 6. End the script with a summary line: total cases, how many passed/failed,
    and exit non-zero if anything failed.
 7. Make the script executable (`chmod +x`) after writing it, and tell me the
-   exact command to run it, including how to point `API_BASE_URL` at the
-   deployed sandbox instead of localhost.
+   exact command to run it, including how to point `API_BASE_URL` at a
+   deployed instance instead of localhost.
 
 Don't require `jq` unless it's already available — check with `command -v jq`
 and fall back to raw output if it's missing, so the script doesn't break on

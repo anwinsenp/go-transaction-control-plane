@@ -3,10 +3,10 @@
 A distributed, real-time transaction processing engine in Go: zero-allocation
 ingestion hot path, Kafka streaming, Postgres reconciliation, a custom
 Kubernetes operator for tenant scaling, and Prometheus/Grafana telemetry,
-deployed to a public sandbox for demonstration.
+deployed end-to-end on a local Kind cluster for demonstration.
 
 ## Ingestion service (`/cmd/ingestion`, `/internal/api`)
-- Public gRPC/REST endpoint that accepts mock high-throughput trade/transaction
+- gRPC/REST endpoint that accepts mock high-throughput trade/transaction
   events.
 - Zero-allocation hot path: use `sync.Pool` for reused buffers/objects,
   preallocate slices with known capacity, avoid unnecessary interface boxing.
@@ -29,11 +29,11 @@ deployed to a public sandbox for demonstration.
   duplicate-delivery, and DLQ-routing cases.
 
 ## Resiliency & hardening
-- **Auth on the public ingestion endpoint**: at minimum an API key /
-  bearer-token check — a public endpoint with no auth is not acceptable to
-  ship, even for a demo/portfolio project.
-- **Rate limiting** on the ingestion endpoint, so the public sandbox can't
-  be trivially overwhelmed by traffic outside your own load tests.
+- **Auth on the ingestion endpoint**: at minimum an API key / bearer-token
+  check — an endpoint with no auth is not acceptable to ship, even for a
+  demo/portfolio project.
+- **Rate limiting** on the ingestion endpoint, so it can't be trivially
+  overwhelmed by traffic outside your own load tests.
 - **Backpressure**: the ingestion service must apply backpressure (reject
   or shed load with a clear response) when downstream (Kafka) can't keep
   up, rather than buffering unboundedly or blocking the hot path.
@@ -43,7 +43,7 @@ deployed to a public sandbox for demonstration.
   again. This is what keeps a degraded Kafka/Postgres from cascading into
   the whole system stalling.
 - **Schema/API versioning**: the transaction event schema (Kafka payload)
-  and the public API contract must be versioned so they can evolve without
+  and the API contract must be versioned so they can evolve without
   silently breaking consumers.
 
 ## Storage layer (`/internal/<domain>/storage`)
@@ -151,24 +151,25 @@ deployed to a public sandbox for demonstration.
 
 ## Local development environment
 - `docker-compose.yml` bringing up Kafka and Postgres locally, so
-  development and tests don't require the AWS sandbox.
+  development and tests don't require a cluster.
 - A documented `make` target or script (`make dev-up` / `./scripts/dev.sh`)
   to start the local stack and run the ingestion + processor services
   against it.
 
-## Infrastructure (`/terraform`)
-- Modular Terraform: one concern per module (networking, k3s cluster on EC2,
-  ingress). Kafka and Postgres are not separate managed-AWS-resource
-  Terraform modules — see below.
-- Self-host Kubernetes via k3s on plain EC2 instances (control plane + agent
-  nodes) rather than managed EKS/ECS, for cost efficiency. Kind is used for
-  local development of the operator against a real API server.
-- Deploy the ingestion layer to the k3s cluster with a public endpoint.
-- Deploy Prometheus + Grafana (kube-prometheus-stack) in-cluster with a
-  public, read-only dashboard link.
+## Infrastructure (`/terraform`) — dropped
+A self-hosted k3s-on-EC2 deployment with a public endpoint (modular
+Terraform: networking/VPC, k3s cluster, ingress, TLS via cert-manager) was
+originally scoped here. It's been dropped in favor of a local Kind cluster
+as the deployment target — see
+[the README's status](README.md#go-transaction-control-plane) and
+[ARCHITECTURE.md's trade-offs](docs/ARCHITECTURE.md#major-trade-offs) for
+why. No `/terraform` directory exists in the repo.
+
+The in-cluster component choices below still apply to the Kind deployment:
 - **Use existing operators for undifferentiated infrastructure — do not
   build custom operators for these.** Kafka: **Strimzi**, in-cluster. TLS:
-  **cert-manager**. Metrics stack: **kube-prometheus-stack**. Postgres:
+  **cert-manager** (not currently deployed in Kind — no public endpoint
+  needs a certificate). Metrics stack: **kube-prometheus-stack**. Postgres:
   in-cluster via a maintained operator/chart (e.g. CloudNativePG or
   Zalando's `postgres-operator`) — see
   [ADR 0006](docs/decisions/0006-postgres-in-cluster.md), which supersedes
@@ -179,15 +180,16 @@ deployed to a public sandbox for demonstration.
 
 ## Load testing & demo artifacts
 - A load-test script (curl burst or small Go load generator) that fires a
-  rapid burst of requests at the public sandbox endpoint.
-- Document expected/observed results (P99 latency, throughput) from a real
-  run against the sandbox — not fabricated numbers.
+  rapid burst of requests at the local Kind ingestion service.
+- Document observed results (P99 latency, throughput) from a real run
+  against the Kind cluster — not fabricated numbers. See the README's
+  [Load test results](README.md#load-test-results).
 
 ## Documentation
-- README: architecture diagram, the "why" behind key trade-offs (e.g.
-  self-hosted k3s vs. managed EKS, and long-running k3s deployment vs.
-  Lambda for cold-start avoidance), public sandbox URL,
-  Grafana dashboard link, how to run the load-test script.
+- README: architecture diagram, the "why" behind key trade-offs (e.g. Kind
+  over a public deployment, and long-running service vs. Lambda for
+  cold-start avoidance), Grafana dashboard link, how to run the load-test
+  script.
 - `docs/RUNBOOK-operator-alerts.md`: diagnosis and action steps for each
   `TradingTenant` alert (isolation, degraded, at-max-replicas), linked from
   every relevant alert's `runbook_url` annotation.
