@@ -68,6 +68,36 @@ This Kind environment is for local development only. The production-style
 deploy target is the k3s cluster on EC2 (issues #32-#35), which is still
 open.
 
+### Visualizing metrics in Grafana
+
+`make kind-deploy` already installs Grafana as part of the
+`kube-prometheus-stack` Helm release, there's no separate install step.
+Reach it via port-forward (there's no ingress in the Kind values):
+
+```
+kubectl -n monitoring port-forward svc/prometheus-grafana 3000:80
+```
+
+Then open `http://localhost:3000` and log in with the chart's default
+admin user (`admin`) and the generated password:
+
+```
+kubectl -n monitoring get secret prometheus-grafana \
+  -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+`deploy/grafana/dashboard.json` is a pre-built "Transaction Control Plane"
+dashboard covering throughput, P50/P99 latency, Kafka consumer lag,
+operator reconcile duration, and circuit breaker state. It imports cleanly
+via **Dashboards → Import** with no manual edits, since it uses a
+templated `${DS_PROMETHEUS}` datasource variable rather than a hardcoded
+UID. See `deploy/grafana/README.md` for the full import steps and a
+panel-to-metric table.
+
+Note that `kind-verify` only sends a single transaction, to see meaningful
+data in the throughput/latency panels you'll want to generate sustained
+traffic against ingestion first.
+
 ## License
 
 [MIT](LICENSE)
