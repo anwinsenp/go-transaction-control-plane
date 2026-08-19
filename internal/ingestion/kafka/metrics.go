@@ -13,10 +13,11 @@ import (
 // throughput/latency/breaker metrics) since this package sits below that
 // domain layer and reports its own transport-level concerns.
 type Metrics struct {
-	tenantReservationDroppedTotal prometheus.Counter
-	partitionCount                *prometheus.GaugeVec
-	partitionStart                *prometheus.GaugeVec
-	knownTenants                  metrics.KnownTenants
+	tenantReservationDroppedTotal     prometheus.Counter
+	tenantReservationReloadErrorTotal prometheus.Counter
+	partitionCount                    *prometheus.GaugeVec
+	partitionStart                    *prometheus.GaugeVec
+	knownTenants                      metrics.KnownTenants
 }
 
 // NewMetrics registers this package's metrics on reg and returns a Metrics
@@ -28,6 +29,14 @@ func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*
 	tenantReservationDropped, err := metrics.NewCounter(reg, prometheus.CounterOpts{
 		Name: "ingestion_kafka_tenant_reservation_dropped_total",
 		Help: "Total tenants configured in Config.TenantPartitions that could not be given an exclusive partition range because the topic did not have enough partitions to honor every reservation.",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new kafka metrics: %w", err)
+	}
+
+	tenantReservationReloadError, err := metrics.NewCounter(reg, prometheus.CounterOpts{
+		Name: "ingestion_kafka_tenant_reservation_reload_errors_total",
+		Help: "Total failed attempts to reload the tenant->partition reservation table from TenantPartitionSource (ADR 0007, part 3) — e.g. a missing/unreadable ConfigMap file or malformed JSON. Distinct from tenant_reservation_dropped_total, which counts a different failure mode: a successfully loaded reservation that couldn't be honored because the topic has too few partitions. A failed reload keeps the last-known-good reservations rather than clearing them.",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new kafka metrics: %w", err)
@@ -50,10 +59,11 @@ func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*
 	}
 
 	return &Metrics{
-		tenantReservationDroppedTotal: tenantReservationDropped.WithLabelValues(),
-		partitionCount:                partitionCount,
-		partitionStart:                partitionStart,
-		knownTenants:                  knownTenants,
+		tenantReservationDroppedTotal:     tenantReservationDropped.WithLabelValues(),
+		tenantReservationReloadErrorTotal: tenantReservationReloadError.WithLabelValues(),
+		partitionCount:                    partitionCount,
+		partitionStart:                    partitionStart,
+		knownTenants:                      knownTenants,
 	}, nil
 }
 

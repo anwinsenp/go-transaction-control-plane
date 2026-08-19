@@ -223,6 +223,56 @@ no-op, not an error — and only emits the `DedicatedPoolTornDown` event and
 counter increment the first pass that actually deletes something, mirroring
 `DedicatedPoolProvisioned`'s create-only signal.
 
+## Tenant-to-partition mapping propagation and hot reload
+
+The per-tenant ConfigMap from the previous section (`KAFKA_MANUAL_PARTITIONS`
+consumed via `envFrom`) only ever configures a dedicated processor's
+partition assignment once, at pod start. That's not enough on its own: the
+shared ingestion publisher — which routes every tenant's traffic, not just
+isolated ones — never sees an isolated tenant's reservation at all, and a
+running dedicated processor has no way to notice a later change to its own
+reserved range (a topic resize, or the operator re-observing a different
+`partitionStart`/`partitionCount`). ADR 0007 part 3 closes this with a
+second, namespace-wide ConfigMap, `tenant-partition-map`, holding every
+currently-isolated tenant's `{start, count}` as one JSON blob
+(`mapping.json`), upserted with a get-modify-update read-write on every
+`Reconcile` pass that has a tenant in the isolation branch, and pruned the
+same way on de-isolation. Unlike the per-tenant dedicated resources, this
+ConfigMap has no single owner reference — it's shared across every isolated
+tenant in the namespace — so its lifecycle is managed entirely through
+explicit entry upsert/removal (`ensureTenantPartitionMapEntry`/
+`removeTenantPartitionMapEntry`), not garbage collection.
+
+Both the shared ingestion publisher and each dedicated processor mount this
+ConfigMap as a projected volume file and poll it on a ticker
+(`internal/ingestion/kafka.TenantPartitionReloader`,
+`internal/processor/kafka.TenantPartitionReloader`) rather than watching it
+through the Kubernetes API — this repo's `/operator` module is the only
+place with a `client-go`/`controller-runtime` dependency (see this repo's
+module-boundary rule), so a poll-the-mounted-file approach avoids pulling a
+Kubernetes client into the ingestion/processor hot path just to watch one
+ConfigMap, and mirrors the polling trade-off this document already makes
+for Prometheus above. The accepted staleness window is the reload interval
+(`DefaultTenantPartitionReloadInterval`, 5s) plus the kubelet's ConfigMap
+volume sync period (~60s by default), so a reservation change can take up
+to roughly 65s to take effect — acceptable for an isolation assignment that
+itself only changes on the scale of a `Reconcile` pass (default 30s
+`RequeueInterval`), not per-request.
+
+A failed or malformed reload (unreadable file, invalid JSON, a tenant
+missing from the map, a zero/negative count) never clears the reservations
+or partition assignment already in effect — both reloaders keep the
+last-known-good state and report the failure on a counter
+(`ingestion_kafka_tenant_reservation_reload_errors_total`,
+`processor_kafka_tenant_partition_reload_errors_total`) instead. This
+matches this repo's existing "under-provisioned reservation" fallback
+(`reservationTable.droppedTenants`): a tenant whose reservation can't be
+honored loses isolation guarantees observably rather than the publisher or
+processor crashing. The dedicated processor's reload additionally adds
+newly-reserved partitions via `AddConsumePartitions` before removing
+dropped ones via `RemoveConsumePartitions`, so a reservation range shift
+never has a moment with zero partitions assigned.
+
 ## Testing approach
 
 Tests use `controller-runtime`'s fake client with one case per decision

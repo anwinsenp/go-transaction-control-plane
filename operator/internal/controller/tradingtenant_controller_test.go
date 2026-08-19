@@ -691,6 +691,64 @@ func TestReconcile_StatusUpdateFailureSkipsTransitionEvent(t *testing.T) {
 	}
 }
 
+// TestReconcile_TenantPartitionMapLifecycle mirrors
+// TestReconcile_DedicatedPoolLifecycle in dedicated_pool_test.go: it drives a
+// tenant into isolation through Reconcile and confirms the shared
+// tenant-partition-map ConfigMap gets an entry for it, then reverts
+// isolation by hand and confirms a further Reconcile removes that entry.
+func TestReconcile_TenantPartitionMapLifecycle(t *testing.T) {
+	tenant := newTestTenant()
+	observer := &fakeObserver{lag: 2000, p99Ms: 10, partitionCount: 3, partitionStart: 5}
+	reconciler, fakeClient := newReconciler(t, tenant, observer)
+	reconciler.IngestionImage = "registry.example/ingestion:v1"
+	reconciler.ProcessorImage = "registry.example/processor:v1"
+	request := reconcileRequest(tenant)
+	ctx := context.Background()
+
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("first Reconcile returned error: %v", err)
+	}
+
+	var afterIsolate tradingv1alpha1.TradingTenant
+	if err := fakeClient.Get(ctx, request.NamespacedName, &afterIsolate); err != nil {
+		t.Fatalf("Get after first Reconcile: %v", err)
+	}
+	if !afterIsolate.Spec.Isolation.DedicatedNodePool {
+		t.Fatal("spec.isolation.dedicatedNodePool = false, want true")
+	}
+
+	_, mapping := getTenantPartitionMap(t, ctx, reconciler, tenant.Namespace)
+	entry, ok := mapping[tenant.Spec.TenantID]
+	if !ok {
+		t.Fatalf("tenant partition map missing entry for tenant %q after isolation Reconcile: %+v", tenant.Spec.TenantID, mapping)
+	}
+	if entry != (tenantPartitionEntry{Start: 5, Count: 3}) {
+		t.Errorf("tenant partition map entry = %+v, want {Start:5 Count:3}", entry)
+	}
+
+	afterIsolate.Spec.Isolation.DedicatedNodePool = false
+	if err := fakeClient.Update(ctx, &afterIsolate); err != nil {
+		t.Fatalf("manual revert Update: %v", err)
+	}
+	// Also stop reporting isolate-triggering signals: otherwise
+	// decision.setDedicatedNodePool would immediately flip the just-reverted
+	// spec flag back to true, masking the teardown path this test means to
+	// exercise (see TestReconcile_DedicatedPoolLifecycle for the same
+	// reasoning).
+	observer.lag = 100
+	observer.p99Ms = 10
+	observer.partitionCount = 12
+
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("second Reconcile (after manual revert) returned error: %v", err)
+	}
+
+	_, mapping = getTenantPartitionMap(t, ctx, reconciler, tenant.Namespace)
+	if _, ok := mapping[tenant.Spec.TenantID]; ok {
+		t.Errorf("tenant partition map still contains entry for de-isolated tenant %q: %+v", tenant.Spec.TenantID, mapping)
+	}
+}
+
 func TestReconcile_NilRecorderAndMetricsSafe(t *testing.T) {
 	tenant := newTestTenant()
 	// lag high, latency normal, partition parity: a state-changing pass

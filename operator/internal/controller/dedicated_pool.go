@@ -27,7 +27,46 @@ const (
 	labelComponent          = "controlplane.anwinsenp.dev/component"
 	ingestionHTTPPort int32 = 8080
 	ingestionGRPCPort int32 = 9090
+
+	// tenantPartitionMapVolumeName, tenantPartitionMapMountDir, and
+	// tenantPartitionMapMountPath wire the shared tenant-partition-map
+	// ConfigMap (see tenant_partition_map.go, ADR 0007 part 3) into a
+	// dedicated ingestion/processor pod as a projected file, so
+	// internal/ingestion/kafka.FileTenantPartitionSource and
+	// internal/processor/kafka.FileTenantPartitionSource can poll it.
+	// TENANT_PARTITION_MAP_PATH (set on each dedicated container below)
+	// points at tenantPartitionMapMountPath.
+	tenantPartitionMapVolumeName = "tenant-partition-map"
+	tenantPartitionMapMountDir   = "/etc/tenant-partition-map"
+	tenantPartitionMapMountPath  = tenantPartitionMapMountDir + "/" + tenantPartitionMapDataKey
 )
+
+// tenantPartitionMapVolume and tenantPartitionMapVolumeMount are shared by
+// both dedicated Deployments so the shared ConfigMap is projected into
+// each pod identically.
+func tenantPartitionMapVolume() corev1.Volume {
+	optional := true
+	return corev1.Volume{
+		Name: tenantPartitionMapVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: tenantPartitionMapName},
+				// Optional: ensureTenantPartitionMapEntry runs after
+				// ensureDedicatedPool in Reconcile (see
+				// tradingtenant_controller.go), so the very first tenant to
+				// isolate in a namespace can have its dedicated pods
+				// scheduled before the shared ConfigMap exists. A missing
+				// mount is treated the same as a missing file by
+				// FileTenantPartitionSource's reload fallback.
+				Optional: &optional,
+			},
+		},
+	}
+}
+
+func tenantPartitionMapVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: tenantPartitionMapVolumeName, MountPath: tenantPartitionMapMountDir, ReadOnly: true}
+}
 
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -179,11 +218,16 @@ func (r *TradingTenantReconciler) ensureDedicatedIngestionDeployment(ctx context
 		deployment.Spec.Template.Labels = labels
 		deployment.Spec.Template.Spec.NodeSelector = r.DedicatedNodeSelector
 		deployment.Spec.Template.Spec.Tolerations = r.DedicatedTolerations
+		deployment.Spec.Template.Spec.Volumes = []corev1.Volume{tenantPartitionMapVolume()}
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{
 			{
 				Name:    "ingestion",
 				Image:   r.IngestionImage,
 				EnvFrom: r.IngestionEnvFrom,
+				Env: []corev1.EnvVar{
+					{Name: "TENANT_PARTITION_MAP_PATH", Value: tenantPartitionMapMountPath},
+				},
+				VolumeMounts: []corev1.VolumeMount{tenantPartitionMapVolumeMount()},
 				Ports: []corev1.ContainerPort{
 					{Name: "http", ContainerPort: ingestionHTTPPort},
 					{Name: "grpc", ContainerPort: ingestionGRPCPort},
@@ -196,10 +240,13 @@ func (r *TradingTenantReconciler) ensureDedicatedIngestionDeployment(ctx context
 
 // ensureDedicatedProcessorDeployment get-or-creates the dedicated
 // processor Deployment. Its container's EnvFrom includes the dedicated
-// ConfigMap (see ensureDedicatedConfigMap), which supplies
+// ConfigMap (see ensureDedicatedConfigMap), which supplies TENANT_ID and
 // KAFKA_MANUAL_PARTITIONS — internal/processor/kafka.ConfigFromEnv reads
-// that to switch the consumer from consumer-group subscription to manual
-// partition assignment scoped to exactly this tenant's reserved range.
+// KAFKA_MANUAL_PARTITIONS to switch the consumer from consumer-group
+// subscription to manual partition assignment scoped to exactly this
+// tenant's reserved range at startup, and TENANT_ID plus the mounted
+// tenant-partition-map ConfigMap (see tenantPartitionMapVolume, ADR 0007
+// part 3) to keep that assignment current afterward without a restart.
 func (r *TradingTenantReconciler) ensureDedicatedProcessorDeployment(ctx context.Context, tenant *tradingv1alpha1.TradingTenant, replicas int32) (controllerutil.OperationResult, error) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -231,11 +278,16 @@ func (r *TradingTenantReconciler) ensureDedicatedProcessorDeployment(ctx context
 		deployment.Spec.Template.Labels = labels
 		deployment.Spec.Template.Spec.NodeSelector = r.DedicatedNodeSelector
 		deployment.Spec.Template.Spec.Tolerations = r.DedicatedTolerations
+		deployment.Spec.Template.Spec.Volumes = []corev1.Volume{tenantPartitionMapVolume()}
 		deployment.Spec.Template.Spec.Containers = []corev1.Container{
 			{
 				Name:    "processor",
 				Image:   r.ProcessorImage,
 				EnvFrom: envFrom,
+				Env: []corev1.EnvVar{
+					{Name: "TENANT_PARTITION_MAP_PATH", Value: tenantPartitionMapMountPath},
+				},
+				VolumeMounts: []corev1.VolumeMount{tenantPartitionMapVolumeMount()},
 			},
 		}
 		return nil

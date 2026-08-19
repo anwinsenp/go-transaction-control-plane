@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,6 +53,15 @@ type Config struct {
 	// listed in TenantPartitions is confined to. Zero defaults to
 	// DefaultPartitionsPerTenant (1) in NewPublisher.
 	DefaultPartitionsPerTenant int32
+	// TenantPartitionSource, if set, hot-reloads TenantPartitions from an
+	// external source on TenantPartitionReloadInterval (ADR 0007, part 3)
+	// for the life of the Publisher, instead of TenantPartitions being
+	// fixed for the process's lifetime. Nil disables hot reload.
+	TenantPartitionSource TenantPartitionSource
+	// TenantPartitionReloadInterval is how often TenantPartitionSource is
+	// polled. Zero uses DefaultTenantPartitionReloadInterval. Ignored if
+	// TenantPartitionSource is nil.
+	TenantPartitionReloadInterval time.Duration
 }
 
 // LocalConfig returns producer settings sized for the docker-compose local
@@ -70,6 +80,10 @@ func LocalConfig() Config {
 // defaults to LocalConfig's single local broker), KAFKA_TOPIC (defaults to
 // "transaction-events"), KAFKA_REQUEST_TIMEOUT, and KAFKA_LINGER (both
 // accepting any format understood by time.ParseDuration, e.g. "10s").
+// TENANT_PARTITION_MAP_PATH, if set, enables hot-reloading TenantPartitions
+// from that file path (ADR 0007, part 3); TENANT_PARTITION_RELOAD_INTERVAL
+// (a time.ParseDuration string) controls how often it's polled and is
+// ignored if TENANT_PARTITION_MAP_PATH is unset.
 func ConfigFromEnv() (Config, error) {
 	config := LocalConfig()
 
@@ -83,6 +97,12 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if err := overrideDurationFromEnv("KAFKA_LINGER", &config.Linger); err != nil {
+		return Config{}, err
+	}
+	if path := os.Getenv("TENANT_PARTITION_MAP_PATH"); path != "" {
+		config.TenantPartitionSource = FileTenantPartitionSource{Path: path}
+	}
+	if err := overrideDurationFromEnv("TENANT_PARTITION_RELOAD_INTERVAL", &config.TenantPartitionReloadInterval); err != nil {
 		return Config{}, err
 	}
 
@@ -149,6 +169,14 @@ type producerClient interface {
 type Publisher struct {
 	client producerClient
 	topic  string
+	// stopReload cancels the tenant-partition reload goroutine started by
+	// NewPublisher when Config.TenantPartitionSource is set. Nil if hot
+	// reload wasn't enabled.
+	stopReload context.CancelFunc
+	// reloadDone is released once the reload goroutine started by
+	// NewPublisher has returned, so Close can block until it has actually
+	// exited rather than merely signaling it to stop.
+	reloadDone sync.WaitGroup
 }
 
 var _ ingestion.Publisher = (*Publisher)(nil)
@@ -181,6 +209,8 @@ func NewPublisher(cfg Config, reg prometheus.Registerer, knownTenants metrics.Kn
 		defaultPartitions = DefaultPartitionsPerTenant
 	}
 
+	partitioner := newTenantPartitioner(cfg.TenantPartitions, defaultPartitions, kafkaMetrics)
+
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID("ingestion"),
@@ -188,13 +218,30 @@ func NewPublisher(cfg Config, reg prometheus.Registerer, knownTenants metrics.Kn
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProduceRequestTimeout(cfg.RequestTimeout),
 		kgo.ProducerLinger(cfg.Linger),
-		kgo.RecordPartitioner(newTenantPartitioner(cfg.TenantPartitions, defaultPartitions, kafkaMetrics)),
+		kgo.RecordPartitioner(partitioner),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new kafka publisher: create client: %w", err)
 	}
 
-	return &Publisher{client: client, topic: cfg.Topic}, nil
+	pub := &Publisher{client: client, topic: cfg.Topic}
+
+	if cfg.TenantPartitionSource != nil {
+		reloadCtx, cancel := context.WithCancel(context.Background())
+		reloader := &TenantPartitionReloader{
+			Source:      cfg.TenantPartitionSource,
+			Partitioner: partitioner,
+			DefaultSize: defaultPartitions,
+			Interval:    cfg.TenantPartitionReloadInterval,
+			Metrics:     kafkaMetrics,
+		}
+		pub.reloadDone.Go(func() {
+			reloader.Run(reloadCtx)
+		})
+		pub.stopReload = cancel
+	}
+
+	return pub, nil
 }
 
 // wireEvent is the JSON shape written to the Kafka payload. It's kept
@@ -261,8 +308,14 @@ func (pub *Publisher) Publish(ctx context.Context, event ingestion.Event) error 
 	return nil
 }
 
-// Close releases the underlying Kafka client's connections, flushing any
-// buffered records first.
+// Close stops the tenant-partition reload goroutine (if hot reload was
+// enabled), blocking until it has actually exited, and then releases the
+// underlying Kafka client's connections, flushing any buffered records
+// first.
 func (pub *Publisher) Close() {
+	if pub.stopReload != nil {
+		pub.stopReload()
+		pub.reloadDone.Wait()
+	}
 	pub.client.Close()
 }

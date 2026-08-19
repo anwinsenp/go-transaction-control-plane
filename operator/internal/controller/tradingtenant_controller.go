@@ -223,6 +223,15 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			r.recordTransition(&tenant, reasonDedicatedPoolProvisioned, corev1.EventTypeNormal,
 				fmt.Sprintf("Dedicated node pool resources provisioned for tenant %s", tenant.Spec.TenantID))
 		}
+		// Published on every pass, not just when created: partitionStart/
+		// partitionCount can drift (topic resize, reservation config change)
+		// without the dedicated pool's Deployments/Service/ConfigMap
+		// themselves needing to change, and the shared ingestion
+		// publisher/dedicated processor's hot reload (ADR 0007 part 3)
+		// depends on this map staying current every reconcile.
+		if err := r.ensureTenantPartitionMapEntry(reconcileCtx, &tenant, partitionStart, partitionCount); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: publishing tenant partition map entry: %w", req.NamespacedName, err)
+		}
 	} else {
 		tornDown, err := r.tearDownDedicatedPool(reconcileCtx, &tenant)
 		if err != nil {
@@ -231,6 +240,9 @@ func (r *TradingTenantReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if tornDown {
 			r.recordTransition(&tenant, reasonDedicatedPoolTornDown, corev1.EventTypeNormal,
 				fmt.Sprintf("Dedicated node pool resources torn down for tenant %s", tenant.Spec.TenantID))
+		}
+		if err := r.removeTenantPartitionMapEntry(reconcileCtx, &tenant); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconciling tradingtenant %s: removing tenant partition map entry: %w", req.NamespacedName, err)
 		}
 	}
 

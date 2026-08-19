@@ -3,6 +3,7 @@ package kafka
 import (
 	"bytes"
 	"sort"
+	"sync/atomic"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -28,31 +29,59 @@ type TenantPartitionConfig map[string]int32
 // tenants ever share a partition, up to the number of distinct tenants the
 // topic's partition count can hold — see reservationTable's doc comment
 // for what happens beyond that.
+//
+// reserved/defaultSize live behind an atomic pointer swap (rather than
+// plain fields) so updateReservations (ADR 0007, part 3's hot reload) can
+// be called concurrently with Publish/Partition without a lock: kgo caches
+// the TopicPartitioner returned by ForTopic for the life of the client, so
+// a hot reload has to update state a long-lived tenantTopicPartitioner is
+// already holding, not just state read once at construction.
 type tenantPartitioner struct {
+	state   atomic.Pointer[tenantPartitionerState]
+	metrics *Metrics
+}
+
+// tenantPartitionerState is the reservation config in effect at a point in
+// time. Each reload swaps in a new *tenantPartitionerState rather than
+// mutating one in place, so a tenantTopicPartitioner can detect "reserved
+// changed" by comparing pointer identity against the last state it built
+// its reservationTable from.
+type tenantPartitionerState struct {
 	reserved    TenantPartitionConfig
 	defaultSize int32
-	metrics     *Metrics
 }
 
 // newTenantPartitioner builds a Partitioner. defaultSize must be >= 1.
 // metrics is optional: pass nil to skip reporting dropped reservations.
 func newTenantPartitioner(reserved TenantPartitionConfig, defaultSize int32, reportedMetrics *Metrics) *tenantPartitioner {
-	return &tenantPartitioner{reserved: reserved, defaultSize: defaultSize, metrics: reportedMetrics}
+	part := &tenantPartitioner{metrics: reportedMetrics}
+	part.state.Store(&tenantPartitionerState{reserved: reserved, defaultSize: defaultSize})
+	return part
+}
+
+// updateReservations swaps in a new reservation config, picked up by every
+// existing and future tenantTopicPartitioner's next Partition() call. It
+// never blocks a concurrent Partition() call: the old state remains valid
+// for any in-flight call already holding a reference to it.
+func (part *tenantPartitioner) updateReservations(reserved TenantPartitionConfig, defaultSize int32) {
+	part.state.Store(&tenantPartitionerState{reserved: reserved, defaultSize: defaultSize})
 }
 
 func (part *tenantPartitioner) ForTopic(string) kgo.TopicPartitioner {
-	return &tenantTopicPartitioner{reserved: part.reserved, defaultSize: part.defaultSize, metrics: part.metrics}
+	return &tenantTopicPartitioner{shared: &part.state, metrics: part.metrics}
 }
 
 // tenantTopicPartitioner partitions records for one topic. Per
 // kgo.Partitioner's documented contract, kgo guarantees only one record
 // uses a given TopicPartitioner at a time, so the lazily-built reservation
-// table below needs no lock despite Publish being called concurrently.
+// table below needs no lock of its own despite Publish being called
+// concurrently across different topics/partitioners — only the shared
+// atomic pointer it reads from is contended, and atomic loads never block.
 type tenantTopicPartitioner struct {
-	reserved    TenantPartitionConfig
-	defaultSize int32
-	metrics     *Metrics
-	table       *reservationTable
+	shared  *atomic.Pointer[tenantPartitionerState]
+	metrics *Metrics
+	state   *tenantPartitionerState
+	table   *reservationTable
 }
 
 // RequiresConsistency reports that a record must keep hashing to the same
@@ -63,16 +92,19 @@ func (*tenantTopicPartitioner) RequiresConsistency(*kgo.Record) bool { return tr
 
 // Partition assigns record to a partition within its tenant's reserved
 // range. The reservation table is built lazily from the first observed
-// partition count and rebuilt only if that count changes (a topic resize),
-// so steady-state calls do no new allocations beyond the occasional
-// pool-assignment cache insert for a tenant seen for the first time. A
-// table (re)build that drops any explicitly configured tenant's
-// reservation reports it on metrics.tenantReservationDroppedTotal, so an
-// under-provisioned topic is observable rather than a silent isolation
-// gap.
+// partition count and rebuilt whenever that count changes (a topic resize)
+// or the shared reservation state has been hot-reloaded (ADR 0007, part 3)
+// since the table currently held was built, so steady-state calls between
+// reloads do no new allocations beyond the occasional pool-assignment
+// cache insert for a tenant seen for the first time. A table (re)build
+// that drops any explicitly configured tenant's reservation reports it on
+// metrics.tenantReservationDroppedTotal, so an under-provisioned topic is
+// observable rather than a silent isolation gap.
 func (part *tenantTopicPartitioner) Partition(record *kgo.Record, totalPartitions int) int {
-	if part.table == nil || part.table.totalPartitions != int32(totalPartitions) {
-		part.table = newReservationTable(part.reserved, part.defaultSize, int32(totalPartitions), part.metrics)
+	currentState := part.shared.Load()
+	if part.table == nil || part.state != currentState || part.table.totalPartitions != int32(totalPartitions) {
+		part.state = currentState
+		part.table = newReservationTable(currentState.reserved, currentState.defaultSize, int32(totalPartitions), part.metrics)
 		if part.metrics != nil && len(part.table.droppedTenants) > 0 {
 			part.metrics.tenantReservationDroppedTotal.Add(float64(len(part.table.droppedTenants)))
 		}

@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +58,23 @@ type Config struct {
 	// rebalances (see ADR 0007, part 2 / operator issue #55). GroupID is
 	// ignored when this is set.
 	ManualPartitions []int32
+	// TenantID identifies which tenant this dedicated processor belongs to
+	// in the shared tenant-partition-map ConfigMap (ADR 0007, part 3), so
+	// its reload loop knows which entry is its own. Required for
+	// TenantPartitionSource to have any effect; ignored otherwise.
+	TenantID string
+	// TenantPartitionSource, if set, hot-reloads this dedicated processor's
+	// manual partition assignment from an external source on
+	// TenantPartitionReloadInterval, instead of ManualPartitions being
+	// fixed for the process's lifetime. Nil disables hot reload. Only
+	// meaningful alongside ManualPartitions/TenantID (manual-assignment
+	// mode) — a shared-pool, consumer-group processor has no single
+	// tenant's entry to track.
+	TenantPartitionSource TenantPartitionSource
+	// TenantPartitionReloadInterval is how often TenantPartitionSource is
+	// polled. Zero uses DefaultTenantPartitionReloadInterval. Ignored if
+	// TenantPartitionSource is nil.
+	TenantPartitionReloadInterval time.Duration
 }
 
 // LocalConfig returns consumer settings sized for the docker-compose local
@@ -79,7 +97,11 @@ func LocalConfig() Config {
 // KAFKA_MAX_RETRIES (a non-negative integer, defaults to 3), and
 // KAFKA_MANUAL_PARTITIONS (comma-separated partition indices; when set,
 // switches the consumer to manual partition assignment and KAFKA_CONSUMER_GROUP
-// is ignored).
+// is ignored). TENANT_ID identifies this dedicated processor's tenant.
+// TENANT_PARTITION_MAP_PATH, if set alongside KAFKA_MANUAL_PARTITIONS and
+// TENANT_ID, enables hot-reloading the manual partition assignment from
+// that file path (ADR 0007, part 3); TENANT_PARTITION_RELOAD_INTERVAL (a
+// time.ParseDuration string) controls how often it's polled.
 func ConfigFromEnv() (Config, error) {
 	config := LocalConfig()
 
@@ -109,11 +131,35 @@ func ConfigFromEnv() (Config, error) {
 		}
 		config.ManualPartitions = parsed
 	}
+	if tenantID := os.Getenv("TENANT_ID"); tenantID != "" {
+		config.TenantID = tenantID
+	}
+	if path := os.Getenv("TENANT_PARTITION_MAP_PATH"); path != "" {
+		config.TenantPartitionSource = FileTenantPartitionSource{Path: path}
+	}
+	if err := overrideDurationFromEnv("TENANT_PARTITION_RELOAD_INTERVAL", &config.TenantPartitionReloadInterval); err != nil {
+		return Config{}, err
+	}
 
 	if err := config.validate(); err != nil {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// overrideDurationFromEnv sets *dest from a time.ParseDuration-formatted
+// environment variable, leaving *dest untouched if the variable is unset.
+func overrideDurationFromEnv(name string, dest *time.Duration) error {
+	value := os.Getenv(name)
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, name, err)
+	}
+	*dest = parsed
+	return nil
 }
 
 // parsePartitionList parses a comma-separated list of non-negative
@@ -155,6 +201,9 @@ func (cfg Config) validate() error {
 	if cfg.MaxRetries < 0 {
 		return fmt.Errorf("%w: MaxRetries must not be negative", ErrInvalidConfig)
 	}
+	if cfg.TenantPartitionSource != nil && (len(cfg.ManualPartitions) == 0 || strings.TrimSpace(cfg.TenantID) == "") {
+		return fmt.Errorf("%w: TenantPartitionSource requires ManualPartitions and TenantID to be set", ErrInvalidConfig)
+	}
 	return nil
 }
 
@@ -166,6 +215,13 @@ func (cfg Config) validate() error {
 type kafkaClient interface {
 	PollFetches(ctx context.Context) kgo.Fetches
 	ProduceSync(ctx context.Context, records ...*kgo.Record) kgo.ProduceResults
+	// AddConsumePartitions and RemoveConsumePartitions let a manually
+	// assigned consumer's partition set change while running, used by
+	// TenantPartitionReloader (ADR 0007, part 3) to pick up a hot-reloaded
+	// reservation without restarting the client or dropping partitions it
+	// keeps across a reload.
+	AddConsumePartitions(partitions map[string]map[int32]kgo.Offset)
+	RemoveConsumePartitions(partitions map[string][]int32)
 	Close()
 }
 
@@ -187,6 +243,21 @@ type Consumer struct {
 	maxRetries int
 	rec        reconciler
 	metrics    *Metrics
+	// assignment tracks the partitions currently assigned via manual
+	// partition assignment, guarded by assignmentMu since it's read/written
+	// from both the TenantPartitionReloader goroutine (see reload.go) and
+	// NewConsumer's initial assignment. Nil when the consumer wasn't built
+	// with ManualPartitions.
+	assignmentMu sync.Mutex
+	assignment   map[int32]struct{}
+	// stopReload cancels the tenant-partition reload goroutine started by
+	// NewConsumer when Config.TenantPartitionSource is set. Nil if hot
+	// reload wasn't enabled.
+	stopReload context.CancelFunc
+	// reloadDone is released once the reload goroutine started by
+	// NewConsumer has returned, so Close can block until it has actually
+	// exited rather than merely signaling it to stop.
+	reloadDone sync.WaitGroup
 }
 
 // NewConsumer builds a Consumer connected to the brokers in cfg, joined to
@@ -212,10 +283,13 @@ func NewConsumer(cfg Config, rec reconciler, reg prometheus.Registerer, knownTen
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID("processor"),
 	}
+	var assignment map[int32]struct{}
 	if len(cfg.ManualPartitions) > 0 {
 		partitionOffsets := make(map[int32]kgo.Offset, len(cfg.ManualPartitions))
+		assignment = make(map[int32]struct{}, len(cfg.ManualPartitions))
 		for _, partition := range cfg.ManualPartitions {
 			partitionOffsets[partition] = kgo.NewOffset().AtStart()
+			assignment[partition] = struct{}{}
 		}
 		clientOpts = append(clientOpts, kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
 			cfg.Topic: partitionOffsets,
@@ -229,14 +303,33 @@ func NewConsumer(cfg Config, rec reconciler, reg prometheus.Registerer, knownTen
 		return nil, fmt.Errorf("new kafka consumer: create client: %w", err)
 	}
 
-	return &Consumer{
+	con := &Consumer{
 		client:     kafkaClient,
 		topic:      cfg.Topic,
 		dlqTopic:   cfg.DLQTopic,
 		maxRetries: cfg.MaxRetries,
 		rec:        rec,
 		metrics:    consumerMetrics,
-	}, nil
+		assignment: assignment,
+	}
+
+	if cfg.TenantPartitionSource != nil {
+		reloadCtx, cancel := context.WithCancel(context.Background())
+		reloader := &TenantPartitionReloader{
+			Source:   cfg.TenantPartitionSource,
+			Consumer: con,
+			TenantID: cfg.TenantID,
+			Topic:    cfg.Topic,
+			Interval: cfg.TenantPartitionReloadInterval,
+			Metrics:  consumerMetrics,
+		}
+		con.reloadDone.Go(func() {
+			reloader.Run(reloadCtx)
+		})
+		con.stopReload = cancel
+	}
+
+	return con, nil
 }
 
 // wireEvent is the JSON shape read from the Kafka payload, matching
@@ -465,8 +558,13 @@ func (con *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-// Close releases the underlying Kafka client's connections and leaves the
-// consumer group.
+// Close stops the tenant-partition reload goroutine (if hot reload was
+// enabled), blocking until it has actually exited, and then releases the
+// underlying Kafka client's connections and leaves the consumer group.
 func (con *Consumer) Close() {
+	if con.stopReload != nil {
+		con.stopReload()
+		con.reloadDone.Wait()
+	}
 	con.client.Close()
 }

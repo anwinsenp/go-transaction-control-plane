@@ -13,9 +13,10 @@ import (
 // throughput/latency/breaker metrics) since this package sits below that
 // domain layer and reports its own transport-level concerns.
 type Metrics struct {
-	consumerLagMessages *prometheus.GaugeVec
-	activeConsumerCount *prometheus.GaugeVec
-	knownTenants        metrics.KnownTenants
+	consumerLagMessages        *prometheus.GaugeVec
+	activeConsumerCount        *prometheus.GaugeVec
+	partitionReloadErrorsTotal prometheus.Counter
+	knownTenants               metrics.KnownTenants
 }
 
 // NewMetrics registers this package's metrics on reg and returns a Metrics
@@ -40,7 +41,20 @@ func NewMetrics(reg prometheus.Registerer, knownTenants metrics.KnownTenants) (*
 		return nil, fmt.Errorf("new processor kafka metrics: %w", err)
 	}
 
-	return &Metrics{consumerLagMessages: consumerLag, activeConsumerCount: activeConsumerCount, knownTenants: knownTenants}, nil
+	partitionReloadErrors, err := metrics.NewCounter(reg, prometheus.CounterOpts{
+		Name: "processor_kafka_tenant_partition_reload_errors_total",
+		Help: "Total failed attempts to reload this dedicated processor's manually assigned partitions from TenantPartitionSource (ADR 0007, part 3) — e.g. a missing/unreadable ConfigMap file, malformed JSON, or a mapping missing this tenant's entry. Distinct from the ingestion side's tenant_reservation_dropped_total, which counts a different failure mode: a reservation that couldn't be honored because the topic has too few partitions. A failed reload keeps the last-known-good assignment rather than clearing it.",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new processor kafka metrics: %w", err)
+	}
+
+	return &Metrics{
+		consumerLagMessages:        consumerLag,
+		activeConsumerCount:        activeConsumerCount,
+		partitionReloadErrorsTotal: partitionReloadErrors.WithLabelValues(),
+		knownTenants:               knownTenants,
+	}, nil
 }
 
 // observeLag reports lag (clamped to zero, since a partition briefly ahead

@@ -334,7 +334,7 @@ func TestSplitPartitionKey(t *testing.T) {
 
 func TestTenantTopicPartitionerPartition(t *testing.T) {
 	reserved := TenantPartitionConfig{"tenant-a": 2}
-	partitioner := &tenantTopicPartitioner{reserved: reserved, defaultSize: 1}
+	partitioner := newTenantPartitioner(reserved, 1, nil).ForTopic("").(*tenantTopicPartitioner)
 
 	record := &kgo.Record{Key: []byte("tenant-a:AAPL")}
 
@@ -350,7 +350,7 @@ func TestTenantTopicPartitionerPartition(t *testing.T) {
 }
 
 func TestTenantTopicPartitionerPartitionRebuildsTableOnPartitionCountChange(t *testing.T) {
-	partitioner := &tenantTopicPartitioner{reserved: TenantPartitionConfig{"tenant-a": 2}, defaultSize: 1}
+	partitioner := newTenantPartitioner(TenantPartitionConfig{"tenant-a": 2}, 1, nil).ForTopic("").(*tenantTopicPartitioner)
 	record := &kgo.Record{Key: []byte("tenant-a:AAPL")}
 
 	partitioner.Partition(record, 8)

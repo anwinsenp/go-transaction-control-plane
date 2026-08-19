@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,8 @@ type fakeConsumerClient struct {
 	closed     bool
 	produced   []*kgo.Record
 	produceErr error
+	added      []map[string]map[int32]kgo.Offset
+	removed    []map[string][]int32
 }
 
 func (fake *fakeConsumerClient) PollFetches(ctx context.Context) kgo.Fetches {
@@ -80,6 +83,14 @@ func (fake *fakeConsumerClient) ProduceSync(ctx context.Context, records ...*kgo
 		results[i] = kgo.ProduceResult{Record: record, Err: err}
 	}
 	return results
+}
+
+func (fake *fakeConsumerClient) AddConsumePartitions(partitions map[string]map[int32]kgo.Offset) {
+	fake.added = append(fake.added, partitions)
+}
+
+func (fake *fakeConsumerClient) RemoveConsumePartitions(partitions map[string][]int32) {
+	fake.removed = append(fake.removed, partitions)
 }
 
 func (fake *fakeConsumerClient) Close() {
@@ -711,6 +722,79 @@ func TestConsumerClose(t *testing.T) {
 	if !fake.closed {
 		t.Error("Close() did not close the underlying client")
 	}
+}
+
+// blockingTenantPartitionSource is a TenantPartitionSource test double whose
+// Load blocks until release is closed, so tests can hold the reload
+// goroutine mid-reload and observe whether Close waits for it.
+type blockingTenantPartitionSource struct {
+	loadStarted chan struct{}
+	release     chan struct{}
+}
+
+func (source *blockingTenantPartitionSource) Load() (map[string]tenantPartitionMapEntry, error) {
+	select {
+	case source.loadStarted <- struct{}{}:
+	default:
+	}
+	<-source.release
+	return nil, errors.New("blockingTenantPartitionSource: no entries configured")
+}
+
+// TestConsumerCloseWaitsForReloadGoroutine proves Close blocks until the
+// tenant-partition reload goroutine started by NewConsumer has actually
+// exited, not merely been signaled to stop: with only con.stopReload()
+// called and no wait, Close would return while the reloader's in-flight
+// Load call (and the goroutine running it) is still outstanding.
+func TestConsumerCloseWaitsForReloadGoroutine(t *testing.T) {
+	source := &blockingTenantPartitionSource{
+		loadStarted: make(chan struct{}, 1),
+		release:     make(chan struct{}),
+	}
+	config := Config{
+		Brokers:                       []string{"127.0.0.1:9"},
+		Topic:                         "transaction-events",
+		DLQTopic:                      "transaction-events-dlq",
+		ManualPartitions:              []int32{0, 1, 2},
+		TenantID:                      "tenant-a",
+		TenantPartitionSource:         source,
+		TenantPartitionReloadInterval: time.Millisecond,
+	}
+
+	consumer, err := NewConsumer(config, &fakeReconciler{}, prometheus.NewRegistry(), nil)
+	if err != nil {
+		t.Fatalf("NewConsumer() error = %v, want nil", err)
+	}
+
+	select {
+	case <-source.loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the reload goroutine to call Load()")
+	}
+
+	closeDone := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		consumer.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("Close() returned while the reload goroutine's Load() call was still blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(source.release)
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Close() to return after the reload goroutine's Load() unblocked")
+	}
+	wg.Wait()
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +130,78 @@ func TestPublisherClose(t *testing.T) {
 	if !fake.closed {
 		t.Error("Close() did not close the underlying client")
 	}
+}
+
+// blockingTenantPartitionSource is a TenantPartitionSource test double whose
+// Load blocks until release is closed, so tests can hold the reload
+// goroutine mid-reload and observe whether Close waits for it.
+type blockingTenantPartitionSource struct {
+	loadStarted chan struct{}
+	release     chan struct{}
+}
+
+func (source *blockingTenantPartitionSource) Load() (TenantPartitionConfig, error) {
+	select {
+	case source.loadStarted <- struct{}{}:
+	default:
+	}
+	<-source.release
+	return TenantPartitionConfig{}, nil
+}
+
+// TestPublisherCloseWaitsForReloadGoroutine proves Close blocks until the
+// tenant-partition reload goroutine started by NewPublisher has actually
+// exited, not merely been signaled to stop: with only pub.stopReload()
+// called and no wait, Close would return while the reloader's in-flight
+// Load call (and the goroutine running it) is still outstanding.
+func TestPublisherCloseWaitsForReloadGoroutine(t *testing.T) {
+	source := &blockingTenantPartitionSource{
+		loadStarted: make(chan struct{}, 1),
+		release:     make(chan struct{}),
+	}
+	config := Config{
+		Brokers:                       []string{"127.0.0.1:9"},
+		Topic:                         "transaction-events",
+		RequestTimeout:                time.Second,
+		Linger:                        time.Millisecond,
+		TenantPartitionSource:         source,
+		TenantPartitionReloadInterval: time.Millisecond,
+	}
+
+	publisher, err := NewPublisher(config, prometheus.NewRegistry(), nil)
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v, want nil", err)
+	}
+
+	select {
+	case <-source.loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the reload goroutine to call Load()")
+	}
+
+	closeDone := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		publisher.Close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+		t.Fatal("Close() returned while the reload goroutine's Load() call was still blocked")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(source.release)
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Close() to return after the reload goroutine's Load() unblocked")
+	}
+	wg.Wait()
 }
 
 func TestConfigFromEnvDefaults(t *testing.T) {
