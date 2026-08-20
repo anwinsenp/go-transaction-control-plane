@@ -48,11 +48,11 @@ make kind-load    # builds ingestion/processor/operator images and loads
 make kind-deploy  # installs Strimzi/CloudNativePG/kube-prometheus-stack via
                    # Helm and applies the ingestion/processor/operator
                    # manifests, in dependency order
-make kind-verify  # sends a sample transaction through the live stack and
-                   # asserts (non-zero exit on failure, not just prints) that
-                   # the TradingTenant reached a known status.state AND that
+make kind-verify  # sends a sample transaction through the live stack, then
+                   # exits non-zero if the TradingTenant didn't reach a known
+                   # status.state or if
                    # tradingtenant_reconcile_duration_seconds{result="success"}
-                   # actually increased off the back of it
+                   # didn't increase off the back of it
 ```
 
 `kind-verify` (`deploy/kind/verify.sh`) is a real assertion, not a smoke
@@ -166,8 +166,8 @@ make kind-verify-isolation
 Drives `TradingTenant/tenant-b` into the operator's `Isolated` state — the
 noisy-neighbor branch of `docs/DESIGN-operator.md`'s decision table, where a
 tenant's Kafka lag is high, latency stays normal, and it's already at
-partition parity with no scaling headroom left — and asserts (not just
-prints) that the whole loop closed:
+partition parity with no scaling headroom left — and checks that the whole
+loop actually closed, failing the run if it didn't:
 
 1. pauses the shared processor (scales it to 0), so `tenant-b` traffic piles
    up unconsumed — bursting load against a *live* processor doesn't work on
@@ -193,10 +193,9 @@ prints) that the whole loop closed:
    resume cycle up to 3 times — the exact drain-vs-scrape timing isn't
    perfectly deterministic run to run
 5. asserts the reconciler's dedicated `tenant-b-dedicated-ingestion` /
-   `tenant-b-dedicated-processor` Deployments actually exist and reach
-   `Available`
+   `tenant-b-dedicated-processor` Deployments exist and reach `Available`
 6. asserts `tradingtenant_isolation_transitions_total{transition="Isolated"}`
-   actually increased
+   increased
 7. asserts the `TenantIsolatedNoisyNeighborSuspected` Prometheus alert
    (`deploy/kind/prometheus/alerts.yaml`, applied by `kind-deploy`) reaches
    `alertstate="firing"`
@@ -236,18 +235,19 @@ make kind-verify-fault-injection
 1. fences the live Postgres instance via CNPG's `cnpg.io/fencedInstances`
    annotation (shuts down the `postgres` process in place, pod and data
    untouched — a real, reversible outage, not a mock) and confirms the pod
-   actually reports not-ready
+   reports not-ready
 2. bursts transactions for `tenant-a` at the now-Postgres-less processor
-3. asserts `processor_postgres_circuit_breaker_state{repository="transactions"}`
+3. waits for `processor_postgres_circuit_breaker_state{repository="transactions"}`
    (`internal/ledger/breaker.go`'s `TransactionRepositoryBreaker`, wrapping
-   every reconcile's Postgres call) actually reaches Open, not just that
-   requests start failing
-4. asserts the failed records actually land on the `transaction-events-dlq`
-   Kafka topic (checked via the broker's own `kafka-get-offsets.sh`, since
-   there's no DLQ-specific Prometheus counter today — see the Roadmap below)
-5. unfences Postgres, waits out the breaker's `OpenTimeout`, and asserts the
+   every reconcile's Postgres call) to reach Open — the breaker state, not
+   just the fact that requests are failing
+4. confirms the failed records land on the `transaction-events-dlq` Kafka
+   topic (checked via the broker's own `kafka-get-offsets.sh`, since there's
+   no DLQ-specific Prometheus counter today)
+5. unfences Postgres, waits out the breaker's `OpenTimeout`, and confirms the
    breaker recovers to Closed on its own via the standard half-open probe
-   (`corebreaker.Machine`) — not just that a later request happens to succeed
+   (`corebreaker.Machine`), rather than assuming it did because a later
+   request happened to succeed
 
 A real run: the breaker went Closed → Open → Closed across the fence/unfence
 cycle, and `transaction-events-dlq`'s message count rose by 30 (one per
@@ -259,26 +259,6 @@ plugin installed, so panel screenshots have to be taken by hand; see
 `deploy/grafana/README.md` if you want to reproduce one interactively):
 
 ![Processor-to-Postgres circuit breaker state over a real fault-injection run: closed, then open for ~40s while Postgres is fenced, then closed again](docs/images/fault-injection-breaker-state.svg)
-
-## Roadmap
-
-Genuine remaining gaps, tracked as open issues rather than claimed as done:
-
-- **[#53](https://github.com/anwinsenp/go-transaction-control-plane/issues/53)
-  Processor: commit Kafka offsets only after successful reconciliation.**
-  The consumer currently relies on franz-go's default background
-  auto-commit, which can advance the committed offset for a record that's
-  still being reconciled (or that failed and is mid-DLQ-route), not
-  strictly after it. Fixing this means disabling auto-commit and committing
-  explicitly once a record's outcome (reconciled or routed to DLQ) is known.
-- **[#57](https://github.com/anwinsenp/go-transaction-control-plane/issues/57)
-  Ingress: tenant-aware routing to dedicated ingestion pool.** Dedicated
-  per-tenant ingestion Deployments exist once a tenant is isolated (see
-  the isolation demo above), but nothing routes external traffic to them
-  by tenant yet — today they're reached the same way as the shared pool.
-- **[#40](https://github.com/anwinsenp/go-transaction-control-plane/issues/40)
-  Repo meta files.** LICENSE is present; CONTRIBUTING.md, issue/PR
-  templates, and documented branch-protection notes are still missing.
 
 ## License
 
